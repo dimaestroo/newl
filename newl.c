@@ -135,7 +135,6 @@ typedef struct
 	float start_opacity;
 	float target_opacity;
 	bool active;
-	bool expanding;
 } Animation;
 typedef struct
 {
@@ -1117,10 +1116,10 @@ get_projected_animation_box(const Animation *anim, struct wlr_box *projected)
 	if (bezier_max_y <= 1.0f)
 		return;
 
-	if (anim->target.width > anim->start.width)
+	if (anim->target.width != anim->start.width)
 		projected->width = (int)(anim->start.width
 								 + (anim->target.width - anim->start.width) * bezier_max_y);
-	if (anim->target.height > anim->start.height)
+	if (anim->target.height != anim->start.height)
 		projected->height = (int)(anim->start.height
 								  + (anim->target.height - anim->start.height) * bezier_max_y);
 }
@@ -1134,10 +1133,12 @@ request_client_size(Client *c, const struct wlr_box *geo)
 	if (!c->mon || !client_surface(c)->mapped)
 		return;
 
-	if (c->anim.active && c->anim.expanding)
+	if (c->anim.active)
 	{
-		requested.width = MAX(requested.width, c->anim.projected.width);
-		requested.height = MAX(requested.height, c->anim.projected.height);
+		requested.width = MAX(requested.width,
+							  MAX(c->anim.target.width, c->anim.projected.width));
+		requested.height = MAX(requested.height,
+							   MAX(c->anim.target.height, c->anim.projected.height));
 	}
 
 	width = MAX(requested.width, 1 + 2 * (int)c->bw) - 2 * c->bw;
@@ -1149,6 +1150,8 @@ static void
 start_animation(Client *c, const struct wlr_box *target, const struct wlr_box *start,
 				float target_opacity)
 {
+	int pre_resize = 0;
+
 	if (!start && c->anim.active
 		&& wlr_box_equal(&c->anim.target, target)
 		&& c->anim.target_opacity == target_opacity)
@@ -1162,20 +1165,18 @@ start_animation(Client *c, const struct wlr_box *target, const struct wlr_box *s
 	c->anim.target = *target;
 	c->anim.start_opacity = c->opacity;
 	c->anim.target_opacity = target_opacity;
-	c->anim.expanding = 0;
 	c->anim.projected = *target;
 
 	if (!client_is_x11(c))
 	{
 		get_projected_animation_box(&c->anim, &c->anim.projected);
-		c->anim.expanding = c->anim.projected.width > c->anim.target.width
-							|| c->anim.projected.height > c->anim.target.height;
+		pre_resize = c->anim.projected.width > c->anim.target.width
+					 || c->anim.projected.height > c->anim.target.height;
 	}
 
 	if (wlr_box_equal(&c->anim.start, target) && c->anim.start_opacity == c->anim.target_opacity)
 	{
 		c->anim.active = 0;
-		c->anim.expanding = 0;
 		apply_client_opacity(c, c->anim.target_opacity);
 		return;
 	}
@@ -1183,7 +1184,7 @@ start_animation(Client *c, const struct wlr_box *target, const struct wlr_box *s
 	clock_gettime(CLOCK_MONOTONIC, &c->anim.start_time);
 	c->anim.active = 1;
 	apply_client_opacity(c, c->anim.start_opacity);
-	if (c->anim.expanding)
+	if (pre_resize)
 		request_client_size(c, &c->anim.projected);
 
 	if (c->mon && c->mon->wlr_output)
@@ -1467,7 +1468,6 @@ start_close_animation(Client *c)
 	destroy_client_borders(c);
 	create_close_overlay(c, &c->geom);
 	c->anim.active = 0;
-	c->anim.expanding = 0;
 	c->close_pending = 1;
 	c->tags = 0;
 	wlr_scene_node_set_enabled(&c->scene->node, 0);
@@ -3091,11 +3091,7 @@ void rendermon(struct wl_listener *listener, void *data)
 		if (progress >= 1.0f)
 		{
 			c->anim.active = 0;
-			if (c->anim.expanding)
-			{
-				c->anim.expanding = 0;
-				resize(c, &c->geom, 0);
-			}
+			resize(c, &c->geom, 0);
 			apply_client_opacity(c, c->anim.target_opacity);
 			continue;
 		}
