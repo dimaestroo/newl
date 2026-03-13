@@ -50,3 +50,7 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Generated Wayland protocol files
+*-protocol.h
+*-protocol.c

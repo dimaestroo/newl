@@ -7,6 +7,10 @@ PKG_CONFIG = pkg-config
 PREFIX = /usr/local
 MANDIR = $(PREFIX)/share/man
 DATADIR = $(PREFIX)/share
+# Ly scans /usr/share/wayland-sessions by default, even when binaries live in /usr/local.
+WAYLANDSESSIONSDIR = /usr/share/wayland-sessions
+# Force logind for display-manager sessions. Leave empty to use libseat autodetect.
+SESSIONENV = LIBSEAT_BACKEND=logind
 
 WLR_INCS = `$(PKG_CONFIG) --cflags wlroots-0.19`
 WLR_LIBS = `$(PKG_CONFIG) --libs wlroots-0.19`

@@ -1,5 +1,7 @@
 [Desktop Entry]
 Name=newl
+DesktopNames=newl
 Comment=a suckless wayland compositor that doesn't suck in its looks department.
 Exec=newl
+TryExec=newl
 Type=Application

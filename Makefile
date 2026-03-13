@@ -19,8 +19,8 @@ NEWLDEVCFLAGS = -g \
 	-Werror=incompatible-pointer-types \
 	-Wfloat-conversion
 
-# Optimization flags
-NEWLOPTFLAGS = \
+# Release optimization flags
+NEWLRELEASEOPTFLAGS = \
 	-O3 \
 	-march=native \
 	-ffast-math \
@@ -31,15 +31,25 @@ NEWLOPTFLAGS = \
 	-fno-omit-frame-pointer \
 	-fno-plt
 
-# Combine all flags
-NEWLALLFLAGS = $(NEWLDEVCFLAGS) $(NEWLOPTFLAGS)
+# Debugging profile flags aimed at producing readable GDB backtraces.
+NEWLDEBUGOPTFLAGS = \
+	-ggdb3 \
+	-O0 \
+	-fno-omit-frame-pointer \
+	-fno-inline \
+	-fno-optimize-sibling-calls \
+	-fno-ipa-cp \
+	-fno-ipa-sra \
+	-fno-plt
 
 # Package configuration
 PKGS = wayland-server xkbcommon libinput $(XLIBS)
-NEWLCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(NEWLCPPFLAGS) $(NEWLALLFLAGS) $(CFLAGS)
+NEWLBASECFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(NEWLCPPFLAGS) $(NEWLDEVCFLAGS) $(CFLAGS)
+NEWLRELEASECFLAGS = $(NEWLBASECFLAGS) $(NEWLRELEASEOPTFLAGS)
+NEWLDEBUGCFLAGS = $(NEWLBASECFLAGS) $(NEWLDEBUGOPTFLAGS)
 
-# Linker flags
-LDFLAGS += \
+# Release linker flags
+NEWLRELEASELDFLAGS = $(LDFLAGS) \
 	-flto \
 	-Wl,--gc-sections \
 	-Wl,--as-needed \
@@ -47,30 +57,48 @@ LDFLAGS += \
 	-Wl,--sort-common \
 	-Wl,--relax
 
+# Debug linker flags avoid LTO and profiling so GDB sees direct frames.
+NEWLDEBUGLDFLAGS = $(LDFLAGS)
+
 LDLIBS = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm $(LIBS)
 
-# For PGO: Uncomment the appropriate set of flags when using profile guided optimization
-# First compile with:
-NEWLOPTFLAGS += -fprofile-generate
-LDFLAGS += -fprofile-generate
-# Then run the program normally, and recompile with:
-# NEWLOPTFLAGS += -fprofile-use
-# LDFLAGS += -fprofile-use
+RELEASE_OBJS = newl.o util.o dwl-ipc-unstable-v2-protocol.o
+DEBUG_OBJS = newl-debug.o util-debug.o dwl-ipc-unstable-v2-protocol-debug.o
 
 all: newl
+debug: newl-debug
 
-newl: newl.o util.o dwl-ipc-unstable-v2-protocol.o
-	$(CC) newl.o util.o dwl-ipc-unstable-v2-protocol.o $(NEWLCFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
+newl: $(RELEASE_OBJS)
+	$(CC) $(RELEASE_OBJS) $(NEWLRELEASECFLAGS) $(NEWLRELEASELDFLAGS) $(LDLIBS) -o $@
+
+newl-debug: $(DEBUG_OBJS)
+	$(CC) $(DEBUG_OBJS) $(NEWLDEBUGCFLAGS) $(NEWLDEBUGLDFLAGS) $(LDLIBS) -o $@
 
 newl.o: newl.c client.h config.h config.mk cursor-shape-v1-protocol.h \
 	ext-image-copy-capture-v1-protocol.h \
 	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
 	wlr-output-power-management-unstable-v1-protocol.h xdg-shell-protocol.h \
 	dwl-ipc-unstable-v2-protocol.h
+	$(CC) $(CPPFLAGS) $(NEWLRELEASECFLAGS) -o $@ -c $<
+
+newl-debug.o: newl.c client.h config.h config.mk cursor-shape-v1-protocol.h \
+	ext-image-copy-capture-v1-protocol.h \
+	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
+	wlr-output-power-management-unstable-v1-protocol.h xdg-shell-protocol.h \
+	dwl-ipc-unstable-v2-protocol.h
+	$(CC) $(CPPFLAGS) $(NEWLDEBUGCFLAGS) -o $@ -c $<
 
 util.o: util.c util.h
+	$(CC) $(CPPFLAGS) $(NEWLRELEASECFLAGS) -o $@ -c $<
+
+util-debug.o: util.c util.h
+	$(CC) $(CPPFLAGS) $(NEWLDEBUGCFLAGS) -o $@ -c $<
 
 dwl-ipc-unstable-v2-protocol.o: dwl-ipc-unstable-v2-protocol.c dwl-ipc-unstable-v2-protocol.h
+	$(CC) $(CPPFLAGS) $(NEWLRELEASECFLAGS) -o $@ -c $<
+
+dwl-ipc-unstable-v2-protocol-debug.o: dwl-ipc-unstable-v2-protocol.c dwl-ipc-unstable-v2-protocol.h
+	$(CC) $(CPPFLAGS) $(NEWLDEBUGCFLAGS) -o $@ -c $<
 
 # Protocol generation
 WAYLAND_SCANNER   = `$(PKG_CONFIG) --variable=wayland_scanner wayland-scanner`
@@ -112,8 +140,7 @@ config.h:
 	cp config.def.h $@
 
 clean:
-	rm -f newl *.o *-protocol.h
-# rm -f *.gcda *.gcno
+	rm -f newl newl-debug *.o *-protocol.h *.gcda *.gcno
 
 dist: clean
 	mkdir -p newl-$(VERSION)
@@ -128,14 +155,16 @@ install: newl
 	rm -f $(DESTDIR)$(PREFIX)/bin/newl
 	cp -f newl $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/newl
-	mkdir -p $(DESTDIR)$(DATADIR)/wayland-sessions
-	cp -f newl.desktop $(DESTDIR)$(DATADIR)/wayland-sessions/newl.desktop
-	chmod 644 $(DESTDIR)$(DATADIR)/wayland-sessions/newl.desktop
+	mkdir -p $(DESTDIR)$(WAYLANDSESSIONSDIR)
+	rm -f $(DESTDIR)$(DATADIR)/wayland-sessions/newl.desktop \
+		$(DESTDIR)$(WAYLANDSESSIONSDIR)/newl.desktop
+	sed \
+		-e 's|^Exec=.*|Exec=/usr/bin/env $(SESSIONENV) $(PREFIX)/bin/newl|' \
+		-e 's|^TryExec=.*|TryExec=$(PREFIX)/bin/newl|' \
+		newl.desktop > $(DESTDIR)$(WAYLANDSESSIONSDIR)/newl.desktop
+	chmod 644 $(DESTDIR)$(WAYLANDSESSIONSDIR)/newl.desktop
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/newl \
-		$(DESTDIR)$(DATADIR)/wayland-sessions/newl.desktop
-
-.SUFFIXES: .c .o
-.c.o:
-	$(CC) $(CPPFLAGS) $(NEWLCFLAGS) -o $@ -c $<
+		$(DESTDIR)$(DATADIR)/wayland-sessions/newl.desktop \
+		$(DESTDIR)$(WAYLANDSESSIONSDIR)/newl.desktop
