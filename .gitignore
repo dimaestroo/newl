@@ -54,3 +54,5 @@ dkms.conf
 # Generated Wayland protocol files
 *-protocol.h
 *-protocol.c
+
+newl

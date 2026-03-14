@@ -3,8 +3,10 @@
 #include <linux/input-event-codes.h>
 #include <math.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -67,7 +69,9 @@
 #include <xcb/xcb_icccm.h>
 #endif
 #include "dwl-ipc-unstable-v2-protocol.h"
-#include "util.h"
+
+static void die(const char *fmt, ...);
+static void *ecalloc(size_t nmemb, size_t size);
 
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 #define CLEANMASK(mask) (mask & ~WLR_MODIFIER_CAPS)
@@ -75,6 +79,7 @@
 #define LENGTH(X) (sizeof X / sizeof X[0])
 #define END(A) ((A) + LENGTH(A))
 #define TAGMASK ((1u << TAGCOUNT) - 1)
+#define CONFIGURE_TIMEOUT_MS 100
 #define LISTEN(E, L, H) wl_signal_add((E), ((L)->notify = (H), (L)))
 #define LISTEN_STATIC(E, H)                               \
 	do                                                    \
@@ -146,6 +151,7 @@ typedef struct
 	struct wl_list link;
 	struct wl_list flink;
 	struct wlr_box geom;
+	struct wlr_box current_geom;
 	struct wlr_box prev;
 	struct wlr_box bounds;
 	union
@@ -172,11 +178,13 @@ typedef struct
 #endif
 	unsigned int bw;
 	uint32_t tags;
+	uint32_t pending_configure_serial;
 	int isfloating, isurgent, isfullscreen;
 	Animation anim;
 	float opacity;
 	bool close_pending;
 	unsigned int initial_position;
+	struct wl_event_source *pending_configure_timeout;
 } Client;
 typedef struct
 {
@@ -234,6 +242,7 @@ typedef struct
 	Animation anim;
 	struct wlr_box geom;
 	float opacity;
+	bool being_unmapped;
 	unsigned int initial_position;
 	struct wlr_layer_surface_v1 *layer_surface;
 	struct wl_listener destroy;
@@ -463,7 +472,37 @@ static void apply_layer_surface_opacity(LayerSurface *l, float opacity);
 static const float *client_border_base_color(Client *c);
 static void update_client_border_color(Client *c);
 static void get_projected_animation_box(const Animation *anim, struct wlr_box *projected);
-static void request_client_size(Client *c, const struct wlr_box *geo);
+static void client_apply_visual_geometry(Client *c, const struct wlr_box *geo);
+static void client_apply_scene_geometry(Client *c, const struct wlr_box *geo);
+static int client_is_interactive_resize(Client *c);
+static int client_should_use_visual_geometry(Client *c,
+											 const struct wlr_box *current,
+											 const struct wlr_box *visual);
+static void client_apply_current_visual_geometry(Client *c,
+												 const struct wlr_box *current,
+												 const struct wlr_box *visual,
+												 int immediate_scene);
+static void client_apply_sampled_opacity(Client *c);
+static void client_init_common(Client *c, unsigned int type, unsigned int bw,
+							   unsigned int initial_position);
+static void client_apply_committed_geometry(Client *c, int width, int height);
+static void client_clear_pending_configure(Client *c);
+static int client_handle_configure_timeout(void *data);
+static int client_get_xdg_committed_size(Client *c, struct wlr_box *size);
+static void client_handle_x11_commit(Client *c);
+static void client_request_geometry(Client *c, const struct wlr_box *geo, int interact);
+static void client_request_surface_size(Client *c, const struct wlr_box *geo,
+										const struct wlr_box *prev);
+static void client_set_scheduled_size(Client *c, const struct wlr_box *geo);
+static void client_set_pending_configure_serial(Client *c, uint32_t serial);
+static void client_create_scene(Client *c);
+static void client_create_borders(Client *c);
+static void client_bootstrap_geometry(Client *c);
+static int client_map_unmanaged(Client *c);
+static void client_finish_managed_map(Client *c, Client *parent);
+static void client_apply_x11_configure_request(
+	Client *c, struct wlr_xwayland_surface_configure_event *event,
+	const struct wlr_box *geo);
 static void start_animation(Client *c, const struct wlr_box *target,
 							const struct wlr_box *start, float target_opacity);
 static void init_animation(Client *c, const struct wlr_box *target, const struct wlr_box *start);
@@ -480,10 +519,18 @@ static void snapshot_close_overlay_buffer(struct wlr_scene_buffer *buffer, int s
 										  void *data);
 static void snapshot_close_overlay_tree(CloseOverlay *overlay,
 										struct wlr_scene_tree *scene_tree, Client *client);
+static CloseOverlay *create_close_overlay_base(Monitor *mon,
+											   const struct wlr_box *geom);
+static void activate_close_overlay(CloseOverlay *overlay);
 static void create_close_overlay(Client *c, const struct wlr_box *geom);
 static void create_layer_surface_close_overlay(LayerSurface *l, const struct wlr_box *geom);
 static void destroy_close_overlay(CloseOverlay *overlay);
 static void apply_close_overlay_opacity(CloseOverlay *overlay, float opacity);
+static int step_client_animation_frame(Client *c, const struct timespec *now);
+static int step_layer_surface_animation_frame(LayerSurface *l,
+											  const struct timespec *now);
+static int step_close_overlay_frame(CloseOverlay *overlay,
+									const struct timespec *now);
 static void start_close_animation(Client *c);
 static void pushlasttop(const Arg *arg);
 static void pushfirstbottom(const Arg *arg);
@@ -603,7 +650,377 @@ static struct wlr_xwayland *xwayland;
 #endif
 
 #include "config.h"
-#include "client.h"
+
+static void
+die(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+
+	if (fmt[0] && fmt[strlen(fmt) - 1] == ':')
+	{
+		fputc(' ', stderr);
+		perror(NULL);
+	}
+	else
+	{
+		fputc('\n', stderr);
+	}
+
+	exit(1);
+}
+
+static void *
+ecalloc(size_t nmemb, size_t size)
+{
+	void *p;
+
+	if (!(p = calloc(nmemb, size)))
+		die("calloc:");
+	return p;
+}
+
+static inline int
+client_is_x11(Client *c)
+{
+#ifdef XWAYLAND
+	return c->type == X11;
+#endif
+	return 0;
+}
+
+static inline struct wlr_surface *
+client_surface(Client *c)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+		return c->surface.xwayland->surface;
+#endif
+	return c->surface.xdg->surface;
+}
+
+static inline int
+toplevel_from_wlr_surface(struct wlr_surface *s, Client **pc, LayerSurface **pl)
+{
+	struct wlr_xdg_surface *xdg_surface, *tmp_xdg_surface;
+	struct wlr_surface *root_surface;
+	struct wlr_layer_surface_v1 *layer_surface;
+	Client *c = NULL;
+	LayerSurface *l = NULL;
+	int type = -1;
+#ifdef XWAYLAND
+	struct wlr_xwayland_surface *xsurface;
+#endif
+
+	if (!s)
+		return -1;
+	root_surface = wlr_surface_get_root_surface(s);
+
+#ifdef XWAYLAND
+	if ((xsurface = wlr_xwayland_surface_try_from_wlr_surface(root_surface)))
+	{
+		c = xsurface->data;
+		type = c->type;
+		goto end;
+	}
+#endif
+
+	if ((layer_surface = wlr_layer_surface_v1_try_from_wlr_surface(root_surface)))
+	{
+		l = layer_surface->data;
+		type = LayerShell;
+		goto end;
+	}
+
+	xdg_surface = wlr_xdg_surface_try_from_wlr_surface(root_surface);
+	while (xdg_surface)
+	{
+		tmp_xdg_surface = NULL;
+		switch (xdg_surface->role)
+		{
+		case WLR_XDG_SURFACE_ROLE_POPUP:
+			if (!xdg_surface->popup || !xdg_surface->popup->parent)
+				return -1;
+
+			tmp_xdg_surface = wlr_xdg_surface_try_from_wlr_surface(xdg_surface->popup->parent);
+
+			if (!tmp_xdg_surface)
+				return toplevel_from_wlr_surface(xdg_surface->popup->parent, pc, pl);
+
+			xdg_surface = tmp_xdg_surface;
+			break;
+		case WLR_XDG_SURFACE_ROLE_TOPLEVEL:
+			c = xdg_surface->data;
+			type = c->type;
+			goto end;
+		case WLR_XDG_SURFACE_ROLE_NONE:
+			return -1;
+		}
+	}
+
+end:
+	if (pl)
+		*pl = l;
+	if (pc)
+		*pc = c;
+	return type;
+}
+
+static inline void
+client_activate_surface(struct wlr_surface *s, int activated)
+{
+	struct wlr_xdg_toplevel *toplevel;
+#ifdef XWAYLAND
+	struct wlr_xwayland_surface *xsurface;
+
+	if ((xsurface = wlr_xwayland_surface_try_from_wlr_surface(s)))
+	{
+		wlr_xwayland_surface_activate(xsurface, activated);
+		return;
+	}
+#endif
+	if ((toplevel = wlr_xdg_toplevel_try_from_wlr_surface(s)))
+		wlr_xdg_toplevel_set_activated(toplevel, activated);
+}
+
+static inline const char *
+client_get_appid(Client *c)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+		return c->surface.xwayland->class ? c->surface.xwayland->class : "broken";
+#endif
+	return c->surface.xdg->toplevel->app_id ? c->surface.xdg->toplevel->app_id : "broken";
+}
+
+static inline void
+client_get_clip(Client *c, struct wlr_box *clip, struct wlr_box *geom)
+{
+	*clip = (struct wlr_box){
+		.x = 0,
+		.y = 0,
+		.width = MAX(geom->width, 1 + (int)c->bw) - c->bw,
+		.height = MAX(geom->height, 1 + (int)c->bw) - c->bw,
+	};
+
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+		return;
+#endif
+
+	clip->x = c->surface.xdg->geometry.x;
+	clip->y = c->surface.xdg->geometry.y;
+}
+
+static inline void
+client_get_geometry(Client *c, struct wlr_box *geom)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+	{
+		geom->x = c->surface.xwayland->x;
+		geom->y = c->surface.xwayland->y;
+		geom->width = c->surface.xwayland->width;
+		geom->height = c->surface.xwayland->height;
+		return;
+	}
+#endif
+	*geom = c->surface.xdg->geometry;
+}
+
+static inline Client *
+client_get_parent(Client *c)
+{
+	Client *p = NULL;
+
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+	{
+		if (c->surface.xwayland->parent)
+			toplevel_from_wlr_surface(c->surface.xwayland->parent->surface, &p, NULL);
+		return p;
+	}
+#endif
+	if (c->surface.xdg->toplevel->parent)
+		toplevel_from_wlr_surface(c->surface.xdg->toplevel->parent->base->surface, &p, NULL);
+	return p;
+}
+
+static inline int
+client_has_children(Client *c)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+		return !wl_list_empty(&c->surface.xwayland->children);
+#endif
+	return wl_list_length(&c->surface.xdg->link) > 1;
+}
+
+static inline const char *
+client_get_title(Client *c)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+		return c->surface.xwayland->title ? c->surface.xwayland->title : "broken";
+#endif
+	return c->surface.xdg->toplevel->title ? c->surface.xdg->toplevel->title : "broken";
+}
+
+static inline int
+client_is_float_type(Client *c)
+{
+	struct wlr_xdg_toplevel *toplevel;
+	struct wlr_xdg_toplevel_state state;
+
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+	{
+		struct wlr_xwayland_surface *surface = c->surface.xwayland;
+		xcb_size_hints_t *size_hints = surface->size_hints;
+
+		if (surface->modal)
+			return 1;
+
+		if (wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DIALOG) || wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH) || wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLBAR) || wlr_xwayland_surface_has_window_type(surface, WLR_XWAYLAND_NET_WM_WINDOW_TYPE_UTILITY))
+		{
+			return 1;
+		}
+
+		return size_hints && size_hints->min_width > 0 && size_hints->min_height > 0 && (size_hints->max_width == size_hints->min_width || size_hints->max_height == size_hints->min_height);
+	}
+#endif
+
+	toplevel = c->surface.xdg->toplevel;
+	state = toplevel->current;
+	return toplevel->parent || (state.min_width != 0 && state.min_height != 0 && (state.min_width == state.max_width || state.min_height == state.max_height));
+}
+
+static inline int
+client_is_unmanaged(Client *c)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+		return c->surface.xwayland->override_redirect;
+#endif
+	return 0;
+}
+
+static inline void
+client_notify_enter(struct wlr_surface *s, struct wlr_keyboard *kb)
+{
+	if (kb)
+		wlr_seat_keyboard_notify_enter(seat, s, kb->keycodes, kb->num_keycodes,
+									   &kb->modifiers);
+	else
+		wlr_seat_keyboard_notify_enter(seat, s, NULL, 0, NULL);
+}
+
+static inline void
+client_send_close(Client *c)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+	{
+		wlr_xwayland_surface_close(c->surface.xwayland);
+		return;
+	}
+#endif
+	wlr_xdg_toplevel_send_close(c->surface.xdg->toplevel);
+}
+
+static inline void
+client_set_border_color(Client *c, const float color[static 4])
+{
+	float applied_color[4] = {
+		color[0],
+		color[1],
+		color[2],
+		color[3] * c->opacity,
+	};
+	int i;
+
+	for (i = 0; i < 4; i++)
+	{
+		if (c->border[i])
+			wlr_scene_rect_set_color(c->border[i], applied_color);
+	}
+}
+
+static inline void
+client_set_fullscreen(Client *c, int fullscreen)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+	{
+		wlr_xwayland_surface_set_fullscreen(c->surface.xwayland, fullscreen);
+		return;
+	}
+#endif
+	wlr_xdg_toplevel_set_fullscreen(c->surface.xdg->toplevel, fullscreen);
+}
+
+static inline void
+client_set_scale(struct wlr_surface *s, float scale)
+{
+	wlr_fractional_scale_v1_notify_scale(s, scale);
+	wlr_surface_set_preferred_buffer_scale(s, (int32_t)ceilf(scale));
+}
+
+static inline void
+client_set_tiled(Client *c, uint32_t edges)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+	{
+		wlr_xwayland_surface_set_maximized(c->surface.xwayland,
+										   edges != WLR_EDGE_NONE,
+										   edges != WLR_EDGE_NONE);
+		return;
+	}
+#endif
+	if (wl_resource_get_version(c->surface.xdg->toplevel->resource) >= XDG_TOPLEVEL_STATE_TILED_RIGHT_SINCE_VERSION)
+	{
+		wlr_xdg_toplevel_set_tiled(c->surface.xdg->toplevel, edges);
+	}
+	else
+	{
+		wlr_xdg_toplevel_set_maximized(c->surface.xdg->toplevel,
+									   edges != WLR_EDGE_NONE);
+	}
+}
+
+static inline void
+client_set_suspended(Client *c, int suspended)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+		return;
+#endif
+
+	wlr_xdg_toplevel_set_suspended(c->surface.xdg->toplevel, suspended);
+}
+
+static inline int
+client_wants_focus(Client *c)
+{
+#ifdef XWAYLAND
+	return client_is_unmanaged(c) && wlr_xwayland_surface_override_redirect_wants_focus(c->surface.xwayland) && wlr_xwayland_surface_icccm_input_model(c->surface.xwayland) != WLR_ICCCM_INPUT_MODEL_NONE;
+#endif
+	return 0;
+}
+
+static inline int
+client_wants_fullscreen(Client *c)
+{
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+		return c->surface.xwayland->fullscreen;
+#endif
+	return c->surface.xdg->toplevel->requested.fullscreen;
+}
 
 static pid_t *autostart_pids;
 static size_t autostart_len;
@@ -994,7 +1411,9 @@ sample_client_animation(Client *c, const struct timespec *now, struct wlr_box *g
 	if (!c->anim.active)
 	{
 		if (geom)
-			*geom = c->geom;
+			*geom = c->current_geom.width > 0 && c->current_geom.height > 0
+						? c->current_geom
+						: c->geom;
 		if (opacity)
 			*opacity = c->opacity;
 		if (progress)
@@ -1117,33 +1536,454 @@ get_projected_animation_box(const Animation *anim, struct wlr_box *projected)
 		return;
 
 	if (anim->target.width != anim->start.width)
-		projected->width = (int)(anim->start.width
-								 + (anim->target.width - anim->start.width) * bezier_max_y);
+		projected->width = (int)(anim->start.width + (anim->target.width - anim->start.width) * bezier_max_y);
 	if (anim->target.height != anim->start.height)
-		projected->height = (int)(anim->start.height
-								  + (anim->target.height - anim->start.height) * bezier_max_y);
+		projected->height = (int)(anim->start.height + (anim->target.height - anim->start.height) * bezier_max_y);
 }
 
 static void
-request_client_size(Client *c, const struct wlr_box *geo)
+client_apply_visual_geometry(Client *c, const struct wlr_box *geo)
+{
+	struct wlr_box clip;
+
+	if (!c->scene || !c->scene_surface)
+		return;
+
+	wlr_scene_node_set_position(&c->scene->node, geo->x, geo->y);
+	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
+	if (c->border[0])
+	{
+		wlr_scene_rect_set_size(c->border[0], MAX(geo->width, 1 + (int)c->bw), c->bw);
+		wlr_scene_rect_set_size(c->border[1], MAX(geo->width, 1 + (int)c->bw), c->bw);
+		wlr_scene_rect_set_size(c->border[2], c->bw,
+								MAX(geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw);
+		wlr_scene_rect_set_size(c->border[3], c->bw,
+								MAX(geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw);
+		wlr_scene_node_set_position(&c->border[1]->node, 0,
+									MAX(geo->height, 1 + (int)c->bw) - c->bw);
+		wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
+		wlr_scene_node_set_position(&c->border[3]->node,
+									MAX(geo->width, 1 + (int)c->bw) - c->bw, c->bw);
+	}
+	client_get_clip(c, &clip, (struct wlr_box *)geo);
+	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+}
+
+static void
+client_apply_scene_geometry(Client *c, const struct wlr_box *geo)
+{
+	c->current_geom = *geo;
+	client_apply_visual_geometry(c, geo);
+}
+
+static int
+client_is_interactive_resize(Client *c)
+{
+	return cursor_mode == CurResize && grabc == c;
+}
+
+static int
+client_should_use_visual_geometry(Client *c, const struct wlr_box *current,
+								  const struct wlr_box *visual)
+{
+	if (c->anim.active)
+		return 1;
+
+	if (client_is_interactive_resize(c))
+		return 0;
+
+	return current->width > visual->width || current->height > visual->height;
+}
+
+static void
+client_apply_current_visual_geometry(Client *c, const struct wlr_box *current,
+									 const struct wlr_box *visual, int immediate_scene)
+{
+	c->current_geom = *current;
+	client_apply_visual_geometry(c, (!immediate_scene || client_should_use_visual_geometry(c, current, visual))
+										? visual
+										: current);
+}
+
+static void
+client_apply_sampled_opacity(Client *c)
+{
+	struct timespec now;
+	float opacity;
+
+	if (!c->scene)
+		return;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	sample_client_animation(c, &now, NULL, &opacity, NULL);
+	apply_client_opacity(c, opacity);
+}
+
+static void
+client_init_common(Client *c, unsigned int type, unsigned int bw,
+				   unsigned int initial_position)
+{
+	c->type = type;
+	c->bw = bw;
+	c->opacity = 1.0f;
+	c->initial_position = initial_position;
+	wl_list_init(&c->commit.link);
+	wl_list_init(&c->map.link);
+	wl_list_init(&c->unmap.link);
+}
+
+static void
+client_apply_committed_geometry(Client *c, int width, int height)
+{
+	struct wlr_box committed;
+
+	committed = c->current_geom.width > 0 && c->current_geom.height > 0
+					? c->current_geom
+					: c->geom;
+
+	if (committed.x != c->geom.x && committed.x + committed.width == c->geom.x + c->geom.width)
+		committed.x = c->geom.x + c->geom.width - width;
+	else
+		committed.x = c->geom.x;
+
+	if (committed.y != c->geom.y && committed.y + committed.height == c->geom.y + c->geom.height)
+		committed.y = c->geom.y + c->geom.height - height;
+	else
+		committed.y = c->geom.y;
+
+	committed.width = width;
+	committed.height = height;
+	client_apply_current_visual_geometry(c, &committed, &c->geom, 1);
+}
+
+static void
+client_clear_pending_configure(Client *c)
+{
+	if (!c->pending_configure_timeout)
+	{
+		c->pending_configure_serial = 0;
+		return;
+	}
+
+	wl_event_source_remove(c->pending_configure_timeout);
+	c->pending_configure_timeout = NULL;
+	c->pending_configure_serial = 0;
+}
+
+static int
+client_handle_configure_timeout(void *data)
+{
+	Client *c = data;
+
+	if (!c->pending_configure_serial)
+		return 0;
+
+	client_clear_pending_configure(c);
+	if (!c->scene || !client_surface(c)->mapped)
+		return 0;
+
+	if (c->geom.x != c->current_geom.x || c->geom.y != c->current_geom.y)
+	{
+		struct wlr_box moved = c->current_geom.width > 0 && c->current_geom.height > 0
+								   ? c->current_geom
+								   : c->geom;
+		moved.x = c->geom.x;
+		moved.y = c->geom.y;
+		client_apply_current_visual_geometry(c, &moved, &c->geom, 1);
+	}
+
+	client_set_scheduled_size(
+		c, client_should_use_visual_geometry(c, &c->current_geom, &c->geom) ? &c->geom
+																			: &c->current_geom);
+	return 0;
+}
+
+static void
+client_handle_x11_commit(Client *c)
+{
+	if (c->scene && client_surface(c)->mapped)
+	{
+		struct wlr_box committed = {
+			.x = c->surface.xwayland->x - (int)c->bw,
+			.y = c->surface.xwayland->y - (int)c->bw,
+			.width = MAX(c->surface.xwayland->width, 1) + 2 * c->bw,
+			.height = MAX(c->surface.xwayland->height, 1) + 2 * c->bw,
+		};
+
+		if (client_is_unmanaged(c))
+			client_apply_scene_geometry(c, &committed);
+		else
+			client_apply_committed_geometry(c, committed.width, committed.height);
+
+		if (!c->anim.active && !client_should_use_visual_geometry(c, &c->current_geom, &c->geom))
+			c->geom = c->current_geom;
+	}
+
+	client_apply_sampled_opacity(c);
+}
+
+static int
+client_get_xdg_committed_size(Client *c, struct wlr_box *size)
+{
+	int inner_width, inner_height;
+
+	*size = c->surface.xdg->geometry;
+	if (size->width <= 0 || size->height <= 0)
+	{
+		size->width = c->surface.xdg->surface->current.width;
+		size->height = c->surface.xdg->surface->current.height;
+	}
+
+	if (size->width <= 0 || size->height <= 0)
+		return 0;
+
+	inner_width = MAX(c->geom.width, 1 + 2 * (int)c->bw) - 2 * c->bw;
+	inner_height = MAX(c->geom.height, 1 + 2 * (int)c->bw) - 2 * c->bw;
+	if ((size->width != inner_width || size->height != inner_height) && c->surface.xdg->surface->current.width == inner_width && c->surface.xdg->surface->current.height == inner_height)
+	{
+		size->width = c->surface.xdg->surface->current.width;
+		size->height = c->surface.xdg->surface->current.height;
+	}
+
+	return 1;
+}
+
+static void
+client_set_scheduled_size(Client *c, const struct wlr_box *geo)
+{
+	if (client_is_x11(c))
+		return;
+
+	c->surface.xdg->toplevel->scheduled.width =
+		MAX(geo->width, 1 + 2 * (int)c->bw) - 2 * c->bw;
+	c->surface.xdg->toplevel->scheduled.height =
+		MAX(geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw;
+}
+
+static void
+client_set_pending_configure_serial(Client *c, uint32_t serial)
+{
+	if (!serial)
+		return;
+
+	c->pending_configure_serial = serial;
+	if (!c->pending_configure_timeout)
+	{
+		c->pending_configure_timeout =
+			wl_event_loop_add_timer(event_loop, client_handle_configure_timeout, c);
+	}
+	wl_event_source_timer_update(c->pending_configure_timeout, CONFIGURE_TIMEOUT_MS);
+}
+
+static void
+client_create_scene(Client *c)
+{
+	c->scene = client_surface(c)->data = wlr_scene_tree_create(layers[LyrTile]);
+	wlr_scene_node_set_enabled(&c->scene->node, client_is_unmanaged(c));
+	c->scene_surface = c->type == XDGShell
+						   ? wlr_scene_xdg_surface_create(c->scene, c->surface.xdg)
+						   : wlr_scene_subsurface_tree_create(c->scene, client_surface(c));
+	c->scene->node.data = c->scene_surface->node.data = c;
+	apply_client_opacity(c, c->opacity);
+	if (c->type == XDGShell)
+	{
+		wl_list_remove(&c->commit.link);
+		wl_list_init(&c->commit.link);
+		LISTEN(&client_surface(c)->events.commit, &c->commit, commitnotify);
+	}
+}
+
+static void
+client_create_borders(Client *c)
+{
+	int i;
+
+	for (i = 0; i < 4; i++)
+	{
+		c->border[i] = wlr_scene_rect_create(c->scene, 0, 0,
+											 c->isurgent ? urgentcolor : bordercolor);
+		c->border[i]->node.data = c;
+	}
+	update_client_border_color(c);
+}
+
+static void
+client_bootstrap_geometry(Client *c)
+{
+	client_get_geometry(c, &c->current_geom);
+	c->geom = c->current_geom;
+
+	if (client_wants_fullscreen(c))
+		setfullscreen(c, 1);
+}
+
+static int
+client_map_unmanaged(Client *c)
+{
+	if (!client_is_unmanaged(c))
+		return 0;
+
+	wlr_scene_node_reparent(&c->scene->node, layers[LyrFloat]);
+	client_apply_scene_geometry(c, &c->current_geom);
+	if (client_wants_focus(c))
+	{
+		focusclient(c, 1);
+		exclusive_focus = c;
+	}
+	return 1;
+}
+
+static void
+client_finish_managed_map(Client *c, Client *parent)
+{
+	client_create_borders(c);
+	client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
+	wl_list_insert(clients.prev, &c->link);
+	wl_list_insert(fstack.prev, &c->flink);
+
+	if (parent)
+	{
+		c->isfloating = 1;
+		if (parent->mon)
+		{
+			c->geom.x = (parent->mon->w.width - c->geom.width) / 2 + parent->mon->m.x;
+			c->geom.y = (parent->mon->w.height - c->geom.height) / 2 + parent->mon->m.y;
+		}
+		setmon(c, parent->mon, parent->tags);
+	}
+	else
+	{
+		applyrules(c);
+		focusclient(c, 1);
+	}
+}
+
+static void
+client_apply_x11_configure_request(
+	Client *c, struct wlr_xwayland_surface_configure_event *event,
+	const struct wlr_box *geo)
+{
+	if (!client_surface(c) || !client_surface(c)->mapped)
+	{
+		wlr_xwayland_surface_configure(c->surface.xwayland,
+									   event->x, event->y, event->width, event->height);
+		return;
+	}
+
+	if (client_is_unmanaged(c))
+	{
+		c->geom = *geo;
+		client_apply_scene_geometry(c, geo);
+		wlr_xwayland_surface_configure(c->surface.xwayland,
+									   event->x, event->y, event->width, event->height);
+		return;
+	}
+
+	if ((c->isfloating && c != grabc) || !c->mon->lt[c->mon->sellt]->arrange)
+		client_request_geometry(c, geo, 0);
+	else
+		arrange(c->mon);
+}
+
+static void
+client_request_surface_size(Client *c, const struct wlr_box *geo,
+							const struct wlr_box *prev)
 {
 	struct wlr_box requested = *geo;
 	uint32_t width, height;
 
-	if (!c->mon || !client_surface(c)->mapped)
+	if (!c->mon || !c->scene || !client_surface(c)->mapped || client_is_unmanaged(c))
 		return;
 
 	if (c->anim.active)
 	{
-		requested.width = MAX(requested.width,
-							  MAX(c->anim.target.width, c->anim.projected.width));
-		requested.height = MAX(requested.height,
-							   MAX(c->anim.target.height, c->anim.projected.height));
+		int width_returning = prev && c->anim.projected.width > c->anim.target.width && geo->width < prev->width;
+		int height_returning = prev && c->anim.projected.height > c->anim.target.height && geo->height < prev->height;
+
+		requested.width = width_returning
+							  ? MAX(requested.width, c->anim.target.width)
+							  : MAX(requested.width,
+									MAX(c->anim.target.width, c->anim.projected.width));
+		requested.height = height_returning
+							   ? MAX(requested.height, c->anim.target.height)
+							   : MAX(requested.height,
+									 MAX(c->anim.target.height, c->anim.projected.height));
 	}
 
 	width = MAX(requested.width, 1 + 2 * (int)c->bw) - 2 * c->bw;
 	height = MAX(requested.height, 1 + 2 * (int)c->bw) - 2 * c->bw;
-	client_set_size(c, width, height);
+
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+	{
+		wlr_xwayland_surface_configure(c->surface.xwayland,
+									   geo->x + c->bw, geo->y + c->bw, width, height);
+		return;
+	}
+#endif
+
+	client_set_pending_configure_serial(c,
+										(c->pending_configure_serial
+										 && c->surface.xdg->toplevel->scheduled.width == (int32_t)width
+										 && c->surface.xdg->toplevel->scheduled.height == (int32_t)height)
+											? 0
+											: wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
+																			(int32_t)width,
+																			(int32_t)height));
+}
+
+static void
+client_request_geometry(Client *c, const struct wlr_box *geo, int interact)
+{
+	struct wlr_box prev = c->geom;
+	int size_changed;
+
+	c->geom = *geo;
+	if (!c->mon || !c->scene || !client_surface(c)->mapped)
+		return;
+
+	if (client_is_unmanaged(c))
+	{
+		client_apply_scene_geometry(c, geo);
+		return;
+	}
+
+	size_changed = geo->width != prev.width || geo->height != prev.height;
+
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+	{
+		uint32_t width = MAX(geo->width, 1 + 2 * (int)c->bw) - 2 * c->bw;
+		uint32_t height = MAX(geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw;
+
+		wlr_xwayland_surface_configure(c->surface.xwayland,
+									   geo->x + c->bw, geo->y + c->bw, width, height);
+		if (!size_changed)
+		{
+			struct wlr_box current = c->current_geom.width > 0 && c->current_geom.height > 0
+										 ? c->current_geom
+										 : *geo;
+			current.x = geo->x;
+			current.y = geo->y;
+			client_apply_current_visual_geometry(c, &current, geo, interact);
+		}
+		return;
+	}
+#endif
+
+	if (size_changed)
+	{
+		client_request_surface_size(c, geo, &prev);
+	}
+	else if (!c->pending_configure_serial)
+	{
+		struct wlr_box current = c->current_geom.width > 0 && c->current_geom.height > 0
+									 ? c->current_geom
+									 : *geo;
+		current.x = geo->x;
+		current.y = geo->y;
+		client_apply_current_visual_geometry(c, &current, geo, interact);
+	}
 }
 
 static void
@@ -1152,9 +1992,7 @@ start_animation(Client *c, const struct wlr_box *target, const struct wlr_box *s
 {
 	int pre_resize = 0;
 
-	if (!start && c->anim.active
-		&& wlr_box_equal(&c->anim.target, target)
-		&& c->anim.target_opacity == target_opacity)
+	if (!start && c->anim.active && wlr_box_equal(&c->anim.target, target) && c->anim.target_opacity == target_opacity)
 	{
 		if (c->mon && c->mon->wlr_output)
 			wlr_output_schedule_frame(c->mon->wlr_output);
@@ -1166,13 +2004,8 @@ start_animation(Client *c, const struct wlr_box *target, const struct wlr_box *s
 	c->anim.start_opacity = c->opacity;
 	c->anim.target_opacity = target_opacity;
 	c->anim.projected = *target;
-
-	if (!client_is_x11(c))
-	{
-		get_projected_animation_box(&c->anim, &c->anim.projected);
-		pre_resize = c->anim.projected.width > c->anim.target.width
-					 || c->anim.projected.height > c->anim.target.height;
-	}
+	get_projected_animation_box(&c->anim, &c->anim.projected);
+	pre_resize = c->anim.projected.width > c->anim.target.width || c->anim.projected.height > c->anim.target.height;
 
 	if (wlr_box_equal(&c->anim.start, target) && c->anim.start_opacity == c->anim.target_opacity)
 	{
@@ -1185,7 +2018,7 @@ start_animation(Client *c, const struct wlr_box *target, const struct wlr_box *s
 	c->anim.active = 1;
 	apply_client_opacity(c, c->anim.start_opacity);
 	if (pre_resize)
-		request_client_size(c, &c->anim.projected);
+		client_request_surface_size(c, &c->anim.projected, NULL);
 
 	if (c->mon && c->mon->wlr_output)
 		wlr_output_schedule_frame(c->mon->wlr_output);
@@ -1359,6 +2192,29 @@ snapshot_close_overlay_tree(CloseOverlay *overlay, struct wlr_scene_tree *scene_
 }
 
 static void
+activate_close_overlay(CloseOverlay *overlay)
+{
+	apply_close_overlay_opacity(overlay, 1.0f);
+	clock_gettime(CLOCK_MONOTONIC, &overlay->start_time);
+	wl_list_insert(close_overlays.prev, &overlay->link);
+	if (overlay->mon && overlay->mon->wlr_output)
+		wlr_output_schedule_frame(overlay->mon->wlr_output);
+}
+
+static CloseOverlay *
+create_close_overlay_base(Monitor *mon, const struct wlr_box *geom)
+{
+	CloseOverlay *overlay = ecalloc(1, sizeof(*overlay));
+
+	overlay->mon = mon;
+	overlay->geom = *geom;
+	overlay->scene = wlr_scene_tree_create(close_overlay_tree);
+	wl_list_init(&overlay->buffers);
+	wlr_scene_node_set_position(&overlay->scene->node, geom->x, geom->y);
+	return overlay;
+}
+
+static void
 destroy_close_overlay(CloseOverlay *overlay)
 {
 	CloseOverlayBuffer *buffer, *tmp;
@@ -1400,44 +2256,20 @@ destroy_client_borders(Client *c)
 static void
 create_close_overlay(Client *c, const struct wlr_box *geom)
 {
-	CloseOverlay *overlay;
-
-	overlay = ecalloc(1, sizeof(*overlay));
-	overlay->mon = c->mon;
-	overlay->geom = *geom;
-	overlay->scene = wlr_scene_tree_create(close_overlay_tree);
-	wl_list_init(&overlay->buffers);
-	wlr_scene_node_set_position(&overlay->scene->node, geom->x, geom->y);
+	CloseOverlay *overlay = create_close_overlay_base(c->mon, geom);
 
 	snapshot_close_overlay_tree(overlay, c->scene, c);
-
-	apply_close_overlay_opacity(overlay, 1.0f);
-	clock_gettime(CLOCK_MONOTONIC, &overlay->start_time);
-	wl_list_insert(close_overlays.prev, &overlay->link);
-	if (overlay->mon && overlay->mon->wlr_output)
-		wlr_output_schedule_frame(overlay->mon->wlr_output);
+	activate_close_overlay(overlay);
 }
 
 static void
 create_layer_surface_close_overlay(LayerSurface *l, const struct wlr_box *geom)
 {
-	CloseOverlay *overlay;
-
-	overlay = ecalloc(1, sizeof(*overlay));
-	overlay->mon = l->mon;
-	overlay->geom = *geom;
-	overlay->scene = wlr_scene_tree_create(close_overlay_tree);
-	wl_list_init(&overlay->buffers);
-	wlr_scene_node_set_position(&overlay->scene->node, geom->x, geom->y);
+	CloseOverlay *overlay = create_close_overlay_base(l->mon, geom);
 
 	snapshot_close_overlay_tree(overlay, l->scene, NULL);
 	snapshot_close_overlay_tree(overlay, l->popups, NULL);
-
-	apply_close_overlay_opacity(overlay, 1.0f);
-	clock_gettime(CLOCK_MONOTONIC, &overlay->start_time);
-	wl_list_insert(close_overlays.prev, &overlay->link);
-	if (overlay->mon && overlay->mon->wlr_output)
-		wlr_output_schedule_frame(overlay->mon->wlr_output);
+	activate_close_overlay(overlay);
 }
 
 static void
@@ -1463,7 +2295,7 @@ start_close_animation(Client *c)
 	sample_client_animation(c, &now, &current_geom, &current_opacity, NULL);
 	c->geom = current_geom;
 	c->opacity = current_opacity;
-	resize(c, &c->geom, 0);
+	client_apply_scene_geometry(c, &current_geom);
 	apply_client_opacity(c, c->opacity);
 	destroy_client_borders(c);
 	create_close_overlay(c, &c->geom);
@@ -1473,6 +2305,73 @@ start_close_animation(Client *c)
 	wlr_scene_node_set_enabled(&c->scene->node, 0);
 	client_set_suspended(c, 1);
 	client_send_close(c);
+}
+
+static int
+step_client_animation_frame(Client *c, const struct timespec *now)
+{
+	struct wlr_box scene_geom;
+	float opacity, progress;
+
+	sample_client_animation(c, now, &scene_geom, &opacity, &progress);
+	if (progress >= 1.0f)
+	{
+		c->anim.active = 0;
+		c->geom = c->anim.target;
+		if (c->pending_configure_serial || c->anim.projected.width != c->anim.target.width || c->anim.projected.height != c->anim.target.height)
+		{
+			client_request_surface_size(c, &c->anim.target, NULL);
+		}
+		else
+		{
+			client_request_geometry(c, &c->anim.target, 0);
+		}
+		client_apply_visual_geometry(c, &c->anim.target);
+		apply_client_opacity(c, c->anim.target_opacity);
+		return 0;
+	}
+
+	client_request_geometry(c, &scene_geom, 0);
+	client_apply_visual_geometry(c, &scene_geom);
+	apply_client_opacity(c, opacity);
+	return 1;
+}
+
+static int
+step_layer_surface_animation_frame(LayerSurface *l, const struct timespec *now)
+{
+	struct wlr_box scene_geom;
+	float opacity, progress;
+
+	sample_layer_surface_animation(l, now, &scene_geom, &opacity, &progress);
+	set_layer_surface_geom(l, &scene_geom);
+	apply_layer_surface_opacity(l, opacity);
+	if (progress >= 1.0f)
+	{
+		l->anim.active = 0;
+		set_layer_surface_geom(l, &l->anim.target);
+		apply_layer_surface_opacity(l, l->anim.target_opacity);
+		return 0;
+	}
+
+	return 1;
+}
+
+static int
+step_close_overlay_frame(CloseOverlay *overlay, const struct timespec *now)
+{
+	float progress, t;
+
+	progress = ((now->tv_sec - overlay->start_time.tv_sec) * 1000 + (now->tv_nsec - overlay->start_time.tv_nsec) / 1000000) / ANIMATION_DURATION;
+	if (progress >= 1.0f)
+	{
+		destroy_close_overlay(overlay);
+		return 0;
+	}
+
+	t = get_y_for_point(&bezier, progress);
+	apply_close_overlay_opacity(overlay, 1.0f - t);
+	return 1;
 }
 
 void init_bezier(void)
@@ -1619,6 +2518,8 @@ void arrangelayer(Monitor *m, struct wl_list *list, struct wlr_box *usable_area,
 		struct wlr_layer_surface_v1 *layer_surface = l->layer_surface;
 
 		if (!layer_surface->initialized)
+			continue;
+		if (l->being_unmapped)
 			continue;
 
 		if (exclusive != (layer_surface->current.exclusive_zone > 0))
@@ -1951,8 +2852,15 @@ void commitlayersurfacenotify(struct wl_listener *listener, void *data)
 void commitnotify(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, commit);
-	float opacity;
-	struct timespec now;
+	struct wlr_box size;
+
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+	{
+		client_handle_x11_commit(c);
+		return;
+	}
+#endif
 
 	if (c->surface.xdg->initial_commit)
 	{
@@ -1972,10 +2880,28 @@ void commitnotify(struct wl_listener *listener, void *data)
 
 	if (c->scene)
 	{
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		sample_client_animation(c, &now, NULL, &opacity, NULL);
-		apply_client_opacity(c, opacity);
+		if (client_get_xdg_committed_size(c, &size))
+		{
+			client_apply_committed_geometry(c,
+											size.width + 2 * c->bw,
+											size.height + 2 * c->bw);
+		}
+
+		if (c->pending_configure_serial && c->pending_configure_serial == c->surface.xdg->current.configure_serial)
+			client_clear_pending_configure(c);
+
+		if (!c->pending_configure_serial && !c->anim.active)
+		{
+			if (!client_should_use_visual_geometry(c, &c->current_geom, &c->geom))
+				c->geom = c->current_geom;
+			client_set_scheduled_size(
+				c, client_should_use_visual_geometry(c, &c->current_geom, &c->geom)
+					   ? &c->geom
+					   : &c->current_geom);
+		}
 	}
+
+	client_apply_sampled_opacity(c);
 }
 
 void commitpopup(struct wl_listener *listener, void *data)
@@ -2001,8 +2927,8 @@ void commitpopup(struct wl_listener *listener, void *data)
 		return;
 	}
 	box = type == LayerShell ? l->mon->m : c->mon->w;
-	box.x -= (type == LayerShell ? l->scene->node.x : c->geom.x);
-	box.y -= (type == LayerShell ? l->scene->node.y : c->geom.y);
+	box.x -= type == LayerShell ? l->scene->node.x : c->current_geom.x;
+	box.y -= type == LayerShell ? l->scene->node.y : c->current_geom.y;
 	wlr_xdg_popup_unconstrain_from_box(popup, &box);
 	wl_list_remove(&listener->link);
 	free(listener);
@@ -2177,9 +3103,7 @@ void createnotify(struct wl_listener *listener, void *data)
 
 	c = toplevel->base->data = ecalloc(1, sizeof(*c));
 	c->surface.xdg = toplevel->base;
-	c->bw = borderpx;
-	c->opacity = 1.0f;
-	c->initial_position = 1;
+	client_init_common(c, XDGShell, borderpx, 1);
 
 	LISTEN(&toplevel->base->surface->events.commit, &c->commit, commitnotify);
 	LISTEN(&toplevel->base->surface->events.map, &c->map, mapnotify);
@@ -2275,7 +3199,9 @@ void cursorwarptohint(void)
 	toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
 	if (c && active_constraint->current.cursor_hint.enabled)
 	{
-		wlr_cursor_warp(cursor, NULL, sx + c->geom.x + c->bw, sy + c->geom.y + c->bw);
+		wlr_cursor_warp(cursor, NULL,
+						sx + c->current_geom.x + c->bw,
+						sy + c->current_geom.y + c->bw);
 		wlr_seat_pointer_warp(active_constraint->seat, sx, sy);
 	}
 }
@@ -2365,12 +3291,18 @@ void destroylocksurface(struct wl_listener *listener, void *data)
 void destroynotify(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, destroy);
+	client_clear_pending_configure(c);
 	wl_list_remove(&c->destroy.link);
 	wl_list_remove(&c->set_title.link);
 	wl_list_remove(&c->fullscreen.link);
 #ifdef XWAYLAND
 	if (c->type != XDGShell)
 	{
+		if (!wl_list_empty(&c->commit.link))
+		{
+			wl_list_remove(&c->commit.link);
+			wl_list_init(&c->commit.link);
+		}
 		wl_list_remove(&c->activate.link);
 		wl_list_remove(&c->associate.link);
 		wl_list_remove(&c->configure.link);
@@ -2381,8 +3313,11 @@ void destroynotify(struct wl_listener *listener, void *data)
 #endif
 	{
 		wl_list_remove(&c->commit.link);
+		wl_list_init(&c->commit.link);
 		wl_list_remove(&c->map.link);
+		wl_list_init(&c->map.link);
 		wl_list_remove(&c->unmap.link);
+		wl_list_init(&c->unmap.link);
 		wl_list_remove(&c->maximize.link);
 	}
 	free(c);
@@ -2737,70 +3672,19 @@ void mapnotify(struct wl_listener *listener, void *data)
 	Client *p = NULL;
 	Client *w, *c = wl_container_of(listener, c, map);
 	Monitor *animmon, *m;
-	int i;
 
 	p = client_get_parent(c);
 	animmon = p && p->mon ? p->mon : xytomon(c->geom.x, c->geom.y);
 	if (c->initial_position && !client_is_unmanaged(c) && !c->isfloating && !p && animmon && animmon->lt[animmon->sellt]->arrange)
 		c->opacity = 0.0f;
 
-	c->scene = client_surface(c)->data = wlr_scene_tree_create(layers[LyrTile]);
-	wlr_scene_node_set_enabled(&c->scene->node, client_is_unmanaged(c));
-	c->scene_surface = c->type == XDGShell
-						   ? wlr_scene_xdg_surface_create(c->scene, c->surface.xdg)
-						   : wlr_scene_subsurface_tree_create(c->scene, client_surface(c));
-	c->scene->node.data = c->scene_surface->node.data = c;
-	apply_client_opacity(c, c->opacity);
-	if (c->type == XDGShell)
-	{
-		wl_list_remove(&c->commit.link);
-		LISTEN(&client_surface(c)->events.commit, &c->commit, commitnotify);
-	}
+	client_create_scene(c);
+	client_bootstrap_geometry(c);
 
-	client_get_geometry(c, &c->geom);
-
-	if (client_wants_fullscreen(c))
-		setfullscreen(c, 1);
-
-	if (client_is_unmanaged(c))
-	{
-		wlr_scene_node_reparent(&c->scene->node, layers[LyrFloat]);
-		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
-		if (client_wants_focus(c))
-		{
-			focusclient(c, 1);
-			exclusive_focus = c;
-		}
+	if (client_map_unmanaged(c))
 		goto unset_fullscreen;
-	}
 
-	for (i = 0; i < 4; i++)
-	{
-		c->border[i] = wlr_scene_rect_create(c->scene, 0, 0,
-											 c->isurgent ? urgentcolor : bordercolor);
-		c->border[i]->node.data = c;
-	}
-	update_client_border_color(c);
-
-	client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
-	wl_list_insert(clients.prev, &c->link);
-	wl_list_insert(fstack.prev, &c->flink);
-
-	if (p)
-	{
-		c->isfloating = 1;
-		if (p->mon)
-		{
-			c->geom.x = (p->mon->w.width - c->geom.width) / 2 + p->mon->m.x;
-			c->geom.y = (p->mon->w.height - c->geom.height) / 2 + p->mon->m.y;
-		}
-		setmon(c, p->mon, p->tags);
-	}
-	else
-	{
-		applyrules(c);
-		focusclient(c, 1);
-	}
+	client_finish_managed_map(c, p);
 	printstatus();
 
 unset_fullscreen:
@@ -2885,8 +3769,8 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx, dou
 			toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
 			if (c && active_constraint->surface == seat->pointer_state.focused_surface)
 			{
-				sx = cursor->x - c->geom.x - c->bw;
-				sy = cursor->y - c->geom.y - c->bw;
+				sx = cursor->x - c->current_geom.x - c->bw;
+				sy = cursor->y - c->current_geom.y - c->bw;
 				if (wlr_region_confine(&active_constraint->region, sx, sy,
 									   sx + dx, sy + dy, &sx_confined, &sy_confined))
 				{
@@ -2910,12 +3794,12 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx, dou
 
 	if (cursor_mode == CurMove)
 	{
-		resize(grabc, &(struct wlr_box){.x = (int)(cursor->x) - grabcx, .y = (int)(cursor->y) - grabcy, .width = grabc->geom.width, .height = grabc->geom.height}, 1);
+		resize(grabc, &(struct wlr_box){.x = (int)(cursor->x) - grabcx, .y = (int)(cursor->y) - grabcy, .width = grabc->current_geom.width, .height = grabc->current_geom.height}, 1);
 		return;
 	}
 	else if (cursor_mode == CurResize)
 	{
-		resize(grabc, &(struct wlr_box){.x = grabc->geom.x, .y = grabc->geom.y, .width = (int)(cursor->x) - grabc->geom.x, .height = (int)(cursor->y) - grabc->geom.y}, 1);
+		resize(grabc, &(struct wlr_box){.x = grabc->current_geom.x, .y = grabc->current_geom.y, .width = (int)(cursor->x) - grabc->current_geom.x, .height = (int)(cursor->y) - grabc->current_geom.y}, 1);
 		return;
 	}
 
@@ -2943,14 +3827,14 @@ void moveresize(const Arg *arg)
 	switch (cursor_mode = arg->ui)
 	{
 	case CurMove:
-		grabcx = (int)(cursor->x) - grabc->geom.x;
-		grabcy = (int)(cursor->y) - grabc->geom.y;
+		grabcx = (int)(cursor->x) - grabc->current_geom.x;
+		grabcy = (int)(cursor->y) - grabc->current_geom.y;
 		wlr_cursor_set_xcursor(cursor, cursor_mgr, "fleur");
 		break;
 	case CurResize:
 		wlr_cursor_warp_closest(cursor, NULL,
-								grabc->geom.x + grabc->geom.width,
-								grabc->geom.y + grabc->geom.height);
+								grabc->current_geom.x + grabc->current_geom.width,
+								grabc->current_geom.y + grabc->current_geom.height);
 		wlr_cursor_set_xcursor(cursor, cursor_mgr, "se-resize");
 		break;
 	}
@@ -3076,7 +3960,6 @@ void rendermon(struct wl_listener *listener, void *data)
 	Client *c;
 	struct wlr_output_state pending = {0};
 	struct timespec now;
-	float opacity, progress, t;
 	int i;
 	int needs_frame = 0;
 
@@ -3085,17 +3968,7 @@ void rendermon(struct wl_listener *listener, void *data)
 	{
 		if (c->mon != m || !c->anim.active)
 			continue;
-		sample_client_animation(c, &now, &c->geom, &opacity, &progress);
-		resize(c, &c->geom, 0);
-		apply_client_opacity(c, opacity);
-		if (progress >= 1.0f)
-		{
-			c->anim.active = 0;
-			resize(c, &c->geom, 0);
-			apply_client_opacity(c, c->anim.target_opacity);
-			continue;
-		}
-		needs_frame = 1;
+		needs_frame |= step_client_animation_frame(c, &now);
 	}
 	for (i = 0; i < 4; i++)
 	{
@@ -3103,32 +3976,14 @@ void rendermon(struct wl_listener *listener, void *data)
 		{
 			if (!l->mapped || !l->anim.active)
 				continue;
-			sample_layer_surface_animation(l, &now, &l->geom, &opacity, &progress);
-			set_layer_surface_geom(l, &l->geom);
-			apply_layer_surface_opacity(l, opacity);
-			if (progress >= 1.0f)
-			{
-				l->anim.active = 0;
-				set_layer_surface_geom(l, &l->anim.target);
-				apply_layer_surface_opacity(l, l->anim.target_opacity);
-				continue;
-			}
-			needs_frame = 1;
+			needs_frame |= step_layer_surface_animation_frame(l, &now);
 		}
 	}
 	wl_list_for_each_safe(overlay, tmp, &close_overlays, link)
 	{
 		if (overlay->mon != m)
 			continue;
-		progress = ((now.tv_sec - overlay->start_time.tv_sec) * 1000 + (now.tv_nsec - overlay->start_time.tv_nsec) / 1000000) / ANIMATION_DURATION;
-		if (progress >= 1.0f)
-		{
-			destroy_close_overlay(overlay);
-			continue;
-		}
-		t = get_y_for_point(&bezier, progress);
-		apply_close_overlay_opacity(overlay, 1.0f - t);
-		needs_frame = 1;
+		needs_frame |= step_close_overlay_frame(overlay, &now);
 	}
 	if (needs_frame)
 		wlr_output_schedule_frame(m->wlr_output);
@@ -3164,30 +4019,9 @@ void requestmonstate(struct wl_listener *listener, void *data)
 
 void resize(Client *c, struct wlr_box *geo, int interact)
 {
-	struct wlr_box clip;
-	if (!c->mon || !client_surface(c)->mapped)
-		return;
-	request_client_size(c, geo);
-	wlr_scene_node_set_position(&c->scene->node, geo->x, geo->y);
-	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
-	if (c->border[0])
-	{
-		wlr_scene_rect_set_size(c->border[0], MAX(geo->width, 1 + (int)c->bw), c->bw);
-		wlr_scene_rect_set_size(c->border[1], MAX(geo->width, 1 + (int)c->bw), c->bw);
-		wlr_scene_rect_set_size(c->border[2], c->bw,
-								MAX(geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw);
-		wlr_scene_rect_set_size(c->border[3], c->bw,
-								MAX(geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw);
-		wlr_scene_node_set_position(&c->border[1]->node, 0,
-									MAX(geo->height, 1 + (int)c->bw) - c->bw);
-		wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
-		wlr_scene_node_set_position(&c->border[3]->node,
-									MAX(geo->width, 1 + (int)c->bw) - c->bw, c->bw);
-	}
-	client_get_clip(c, &clip, geo);
-	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 	if (interact)
-		c->geom = *geo;
+		c->anim.active = 0;
+	client_request_geometry(c, geo, interact);
 }
 
 void run(char *startup_cmd)
@@ -3703,7 +4537,11 @@ void unmaplayersurfacenotify(struct wl_listener *listener, void *data)
 	if (l == exclusive_focus)
 		exclusive_focus = NULL;
 	if (l->layer_surface->output && (l->mon = l->layer_surface->output->data))
+	{
+		l->being_unmapped = 1;
 		arrangelayers(l->mon);
+		l->being_unmapped = 0;
+	}
 	if (l->layer_surface->surface == seat->keyboard_state.focused_surface)
 		focusclient(focustop(selmon), 1);
 	motionnotify(0, NULL, 0, 0, 0, 0);
@@ -3712,6 +4550,7 @@ void unmaplayersurfacenotify(struct wl_listener *listener, void *data)
 void unmapnotify(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, unmap);
+	client_clear_pending_configure(c);
 	if (c == grabc)
 	{
 		cursor_mode = CurNormal;
@@ -3946,6 +4785,7 @@ void associatex11(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, associate);
 
+	LISTEN(&client_surface(c)->events.commit, &c->commit, commitnotify);
 	LISTEN(&client_surface(c)->events.map, &c->map, mapnotify);
 	LISTEN(&client_surface(c)->events.unmap, &c->unmap, unmapnotify);
 }
@@ -3954,27 +4794,14 @@ void configurex11(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, configure);
 	struct wlr_xwayland_surface_configure_event *event = data;
-	if (!client_surface(c) || !client_surface(c)->mapped)
-	{
-		wlr_xwayland_surface_configure(c->surface.xwayland,
-									   event->x, event->y, event->width, event->height);
-		return;
-	}
-	if (client_is_unmanaged(c))
-	{
-		wlr_scene_node_set_position(&c->scene->node, event->x, event->y);
-		wlr_xwayland_surface_configure(c->surface.xwayland,
-									   event->x, event->y, event->width, event->height);
-		return;
-	}
-	if ((c->isfloating && c != grabc) || !c->mon->lt[c->mon->sellt]->arrange)
-	{
-		resize(c, &(struct wlr_box){.x = event->x - c->bw, .y = event->y - c->bw, .width = event->width + c->bw * 2, .height = event->height + c->bw * 2}, 0);
-	}
-	else
-	{
-		arrange(c->mon);
-	}
+	struct wlr_box geo = {
+		.x = event->x - (int)c->bw,
+		.y = event->y - (int)c->bw,
+		.width = event->width + 2 * c->bw,
+		.height = event->height + 2 * c->bw,
+	};
+
+	client_apply_x11_configure_request(c, event, &geo);
 }
 
 void createnotifyx11(struct wl_listener *listener, void *data)
@@ -3984,9 +4811,7 @@ void createnotifyx11(struct wl_listener *listener, void *data)
 
 	c = xsurface->data = ecalloc(1, sizeof(*c));
 	c->surface.xwayland = xsurface;
-	c->type = X11;
-	c->bw = client_is_unmanaged(c) ? 0 : borderpx;
-	c->opacity = 1.0f;
+	client_init_common(c, X11, client_is_unmanaged(c) ? 0 : borderpx, 0);
 
 	LISTEN(&xsurface->events.associate, &c->associate, associatex11);
 	LISTEN(&xsurface->events.destroy, &c->destroy, destroynotify);
@@ -4001,8 +4826,15 @@ void createnotifyx11(struct wl_listener *listener, void *data)
 void dissociatex11(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, dissociate);
+	if (!wl_list_empty(&c->commit.link))
+	{
+		wl_list_remove(&c->commit.link);
+		wl_list_init(&c->commit.link);
+	}
 	wl_list_remove(&c->map.link);
+	wl_list_init(&c->map.link);
 	wl_list_remove(&c->unmap.link);
+	wl_list_init(&c->unmap.link);
 }
 
 void sethints(struct wl_listener *listener, void *data)

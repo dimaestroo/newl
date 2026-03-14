@@ -62,8 +62,8 @@ NEWLDEBUGLDFLAGS = $(LDFLAGS)
 
 LDLIBS = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm $(LIBS)
 
-RELEASE_OBJS = newl.o util.o dwl-ipc-unstable-v2-protocol.o
-DEBUG_OBJS = newl-debug.o util-debug.o dwl-ipc-unstable-v2-protocol-debug.o
+RELEASE_OBJS = newl.o dwl-ipc-unstable-v2-protocol.o
+DEBUG_OBJS = newl-debug.o dwl-ipc-unstable-v2-protocol-debug.o
 
 all: newl
 debug: newl-debug
@@ -74,24 +74,18 @@ newl: $(RELEASE_OBJS)
 newl-debug: $(DEBUG_OBJS)
 	$(CC) $(DEBUG_OBJS) $(NEWLDEBUGCFLAGS) $(NEWLDEBUGLDFLAGS) $(LDLIBS) -o $@
 
-newl.o: newl.c client.h config.h config.mk cursor-shape-v1-protocol.h \
+newl.o: newl.c config.h config.mk cursor-shape-v1-protocol.h \
 	ext-image-copy-capture-v1-protocol.h \
 	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
 	wlr-output-power-management-unstable-v1-protocol.h xdg-shell-protocol.h \
 	dwl-ipc-unstable-v2-protocol.h
 	$(CC) $(CPPFLAGS) $(NEWLRELEASECFLAGS) -o $@ -c $<
 
-newl-debug.o: newl.c client.h config.h config.mk cursor-shape-v1-protocol.h \
+newl-debug.o: newl.c config.h config.mk cursor-shape-v1-protocol.h \
 	ext-image-copy-capture-v1-protocol.h \
 	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
 	wlr-output-power-management-unstable-v1-protocol.h xdg-shell-protocol.h \
 	dwl-ipc-unstable-v2-protocol.h
-	$(CC) $(CPPFLAGS) $(NEWLDEBUGCFLAGS) -o $@ -c $<
-
-util.o: util.c util.h
-	$(CC) $(CPPFLAGS) $(NEWLRELEASECFLAGS) -o $@ -c $<
-
-util-debug.o: util.c util.h
 	$(CC) $(CPPFLAGS) $(NEWLDEBUGCFLAGS) -o $@ -c $<
 
 dwl-ipc-unstable-v2-protocol.o: dwl-ipc-unstable-v2-protocol.c dwl-ipc-unstable-v2-protocol.h
@@ -144,8 +138,8 @@ clean:
 
 dist: clean
 	mkdir -p newl-$(VERSION)
-	cp -R LICENSE* Makefile CHANGELOG.md README.md client.h config.def.h \
-		config.mk protocols newl.1 newl.c util.c util.h newl.desktop \
+	cp -R LICENSE* Makefile CHANGELOG.md README.md config.def.h \
+		config.mk protocols newl.1 newl.c newl.desktop \
 		newl-$(VERSION)
 	tar -caf newl-$(VERSION).tar.gz newl-$(VERSION)
 	rm -rf newl-$(VERSION)
