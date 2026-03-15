@@ -526,7 +526,6 @@ static void start_animation_at(Client *c, const struct wlr_box *target,
 static void start_animation(Client *c, const struct wlr_box *target,
                             const struct wlr_box *start, float target_opacity);
 static void init_animation(Client *c, const struct wlr_box *target, const struct wlr_box *start);
-static void prepare_initial_position(Client *c, const struct wlr_box *target, float scale);
 static void start_layout_animation(Client *c, Monitor *m, const struct wlr_box *target);
 static void start_tag_switch_exit_animation(Client *c, Monitor *m);
 static void prepare_layer_surface_initial_position(LayerSurface *l,
@@ -1976,27 +1975,23 @@ start_animation(Client *c, const struct wlr_box *target, const struct wlr_box *s
 }
 
 static void
-prepare_initial_position(Client *c, const struct wlr_box *target, float scale) {
-  if (!c->initial_position)
-    return;
-
-  if (scale > 0.0f) {
-    c->geom.width = (int)(target->width * scale);
-    c->geom.height = (int)(target->height * scale);
-    c->geom.x = target->x + (target->width - c->geom.width) / 2;
-    c->geom.y = target->y + (target->height - c->geom.height) / 2;
-  }
-
-  c->opacity = 0.0f;
-  c->initial_position = 0;
-}
-
-static void
 start_layout_animation(Client *c, Monitor *m, const struct wlr_box *target) {
   struct wlr_box start;
 
   if (c->close_pending)
     return;
+
+  if (c->initial_position) {
+    if (initial_layout_animation_scale > 0.0f) {
+      c->geom.width = (int)(target->width * initial_layout_animation_scale);
+      c->geom.height = (int)(target->height * initial_layout_animation_scale);
+      c->geom.x = target->x + (target->width - c->geom.width) / 2;
+      c->geom.y = target->y + (target->height - c->geom.height) / 2;
+    }
+
+    c->opacity = 0.0f;
+    c->initial_position = 0;
+  }
 
   if (m->switch_animate && !VISIBLEONTAGS(c, m, m->prevtagset)) {
     start = *target;
@@ -3553,7 +3548,6 @@ void monocle(Monitor *m) {
     if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
       continue;
     n++;
-    prepare_initial_position(c, &m->w, 0.0f);
     start_layout_animation(c, m, &m->w);
   }
   if (n)
@@ -4243,7 +4237,6 @@ void tile(Monitor *m) {
 
       stack_y += stack_height + m->gaps * enablegaps;
     }
-    prepare_initial_position(c, &target, 0.5f);
     start_layout_animation(c, m, &target);
     i++;
   }

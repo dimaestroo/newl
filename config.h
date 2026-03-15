@@ -3,7 +3,7 @@
                     ((hex >> 8) & 0xFF) / 255.0f,  \
                     (hex & 0xFF) / 255.0f}
 #define ANIMATION_DURATION 400.0f // Animation duration in milliseconds
-
+static const float initial_layout_animation_scale = 0.5f; // Set <= 0.0f to keep the initial size
 static struct BezierCurve bezier = {
     .control_points = {
         {0.0f, 0.0f},
