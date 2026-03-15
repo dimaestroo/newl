@@ -4412,14 +4412,14 @@ void startdrag(struct wl_listener *listener, void *data)
 
 void tag(const Arg *arg)
 {
+	uint32_t newtags;
 	Client *sel = focustop(selmon);
-	if (!sel || (arg->ui & TAGMASK) == 0)
+	if (!sel || !(newtags = arg->ui & TAGMASK))
 		return;
 
-	sel->tags = arg->ui & TAGMASK;
-	focusclient(focustop(selmon), 1);
-	arrange(selmon);
-	printstatus();
+	sel->tags = newtags;
+	setmonitortags(selmon, newtags, 1);
+	focusclient(sel, 1);
 }
 
 void tagmon(const Arg *arg)
