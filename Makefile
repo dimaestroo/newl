@@ -3,11 +3,9 @@
 
 include config.mk
 
-# Base flags for compiling
 NEWLCPPFLAGS = -I. -DWLR_USE_UNSTABLE -D_POSIX_C_SOURCE=200809L \
 	-DVERSION=\"$(VERSION)\" $(XWAYLAND)
 
-# Development and warning flags
 NEWLDEVCFLAGS = -g \
 	-Wpedantic -Wall -Wextra \
 	-Wdeclaration-after-statement \
@@ -19,7 +17,6 @@ NEWLDEVCFLAGS = -g \
 	-Werror=incompatible-pointer-types \
 	-Wfloat-conversion
 
-# Release optimization flags
 NEWLRELEASEOPTFLAGS = \
 	-O3 \
 	-march=native \
@@ -31,7 +28,6 @@ NEWLRELEASEOPTFLAGS = \
 	-fno-omit-frame-pointer \
 	-fno-plt
 
-# Debugging profile flags aimed at producing readable GDB backtraces.
 NEWLDEBUGOPTFLAGS = \
 	-ggdb3 \
 	-O0 \
@@ -42,13 +38,11 @@ NEWLDEBUGOPTFLAGS = \
 	-fno-ipa-sra \
 	-fno-plt
 
-# Package configuration
 PKGS = wayland-server xkbcommon libinput $(XLIBS)
 NEWLBASECFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(NEWLCPPFLAGS) $(NEWLDEVCFLAGS) $(CFLAGS)
 NEWLRELEASECFLAGS = $(NEWLBASECFLAGS) $(NEWLRELEASEOPTFLAGS)
 NEWLDEBUGCFLAGS = $(NEWLBASECFLAGS) $(NEWLDEBUGOPTFLAGS)
 
-# Release linker flags
 NEWLRELEASELDFLAGS = $(LDFLAGS) \
 	-flto \
 	-Wl,--gc-sections \
@@ -57,7 +51,6 @@ NEWLRELEASELDFLAGS = $(LDFLAGS) \
 	-Wl,--sort-common \
 	-Wl,--relax
 
-# Debug linker flags avoid LTO and profiling so GDB sees direct frames.
 NEWLDEBUGLDFLAGS = $(LDFLAGS)
 
 LDLIBS = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm $(LIBS)
@@ -94,7 +87,6 @@ dwl-ipc-unstable-v2-protocol.o: dwl-ipc-unstable-v2-protocol.c dwl-ipc-unstable-
 dwl-ipc-unstable-v2-protocol-debug.o: dwl-ipc-unstable-v2-protocol.c dwl-ipc-unstable-v2-protocol.h
 	$(CC) $(CPPFLAGS) $(NEWLDEBUGCFLAGS) -o $@ -c $<
 
-# Protocol generation
 WAYLAND_SCANNER   = `$(PKG_CONFIG) --variable=wayland_scanner wayland-scanner`
 WAYLAND_PROTOCOLS = `$(PKG_CONFIG) --variable=pkgdatadir wayland-protocols`
 
@@ -110,11 +102,11 @@ pointer-constraints-unstable-v1-protocol.h:
 	$(WAYLAND_SCANNER) enum-header \
 		$(WAYLAND_PROTOCOLS)/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml $@
 
-wlr-layer-shell-unstable-v1-protocol.h:
+wlr-layer-shell-unstable-v1-protocol.h: protocols/wlr-layer-shell-unstable-v1.xml
 	$(WAYLAND_SCANNER) enum-header \
 		protocols/wlr-layer-shell-unstable-v1.xml $@
 
-wlr-output-power-management-unstable-v1-protocol.h:
+wlr-output-power-management-unstable-v1-protocol.h: protocols/wlr-output-power-management-unstable-v1.xml
 	$(WAYLAND_SCANNER) server-header \
 		protocols/wlr-output-power-management-unstable-v1.xml $@
 
@@ -122,11 +114,11 @@ xdg-shell-protocol.h:
 	$(WAYLAND_SCANNER) server-header \
 		$(WAYLAND_PROTOCOLS)/stable/xdg-shell/xdg-shell.xml $@
 
-dwl-ipc-unstable-v2-protocol.h:
+dwl-ipc-unstable-v2-protocol.h: protocols/dwl-ipc-unstable-v2.xml
 	$(WAYLAND_SCANNER) server-header \
 		protocols/dwl-ipc-unstable-v2.xml $@
 
-dwl-ipc-unstable-v2-protocol.c:
+dwl-ipc-unstable-v2-protocol.c: protocols/dwl-ipc-unstable-v2.xml
 	$(WAYLAND_SCANNER) private-code \
 		protocols/dwl-ipc-unstable-v2.xml $@
 
@@ -134,7 +126,7 @@ config.h:
 	cp config.def.h $@
 
 clean:
-	rm -f newl newl-debug *.o *-protocol.h *.gcda *.gcno
+	rm -f newl newl-debug *.o *-protocol.h *-protocol.c *.gcda *.gcno
 
 dist: clean
 	mkdir -p newl-$(VERSION)

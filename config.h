@@ -29,7 +29,7 @@ static const char *const autostart[] = {
 	"dbus-update-activation-environment", "--systemd", "WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP=newl", NULL,
 	"systemctl", "--user", "start", "hyprpolkitagent", NULL,
 	"waybar", NULL,
-	"nm-applet", NULL,
+	"iwqt", NULL,
 	"swaybg", "-i", "/home/agam/.config/wallpaper.jpeg", "-m", "fill", NULL,
 	"mako", NULL,
 	NULL};

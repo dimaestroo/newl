@@ -75,7 +75,8 @@ static void *ecalloc(size_t nmemb, size_t size);
 
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 #define CLEANMASK(mask) (mask & ~WLR_MODIFIER_CAPS)
-#define VISIBLEON(C, M) ((M) && (C)->mon == (M) && ((C)->tags & (M)->tagset[(M)->seltags]))
+#define VISIBLEONTAGS(C, M, T) ((M) && (C)->mon == (M) && ((C)->tags & (T)))
+#define VISIBLEON(C, M) VISIBLEONTAGS((C), (M), (M)->tagset[(M)->seltags])
 #define LENGTH(X) (sizeof X / sizeof X[0])
 #define END(A) ((A) + LENGTH(A))
 #define TAGMASK ((1u << TAGCOUNT) - 1)
@@ -272,6 +273,7 @@ struct Monitor
 	unsigned int seltags;
 	unsigned int sellt;
 	uint32_t tagset[2];
+	uint32_t prevtagset;
 	float mfact;
 	int gamma_lut_changed;
 	char ltsymbol[16];
@@ -1897,14 +1899,11 @@ client_request_surface_size(Client *c, const struct wlr_box *geo,
 
 	if (c->anim.active)
 	{
-		int width_returning = prev && c->anim.projected.width > c->anim.target.width && geo->width < prev->width;
-		int height_returning = prev && c->anim.projected.height > c->anim.target.height && geo->height < prev->height;
-
-		requested.width = width_returning
+		requested.width = prev && c->anim.projected.width > c->anim.target.width && geo->width < prev->width
 							  ? MAX(requested.width, c->anim.target.width)
 							  : MAX(requested.width,
 									MAX(c->anim.target.width, c->anim.projected.width));
-		requested.height = height_returning
+		requested.height = prev && c->anim.projected.height > c->anim.target.height && geo->height < prev->height
 							   ? MAX(requested.height, c->anim.target.height)
 							   : MAX(requested.height,
 									 MAX(c->anim.target.height, c->anim.projected.height));
@@ -1923,13 +1922,11 @@ client_request_surface_size(Client *c, const struct wlr_box *geo,
 #endif
 
 	client_set_pending_configure_serial(c,
-										(c->pending_configure_serial
-										 && c->surface.xdg->toplevel->scheduled.width == (int32_t)width
-										 && c->surface.xdg->toplevel->scheduled.height == (int32_t)height)
+										(c->pending_configure_serial && c->surface.xdg->toplevel->scheduled.width == (int32_t)width && c->surface.xdg->toplevel->scheduled.height == (int32_t)height)
 											? 0
 											: wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
-																			(int32_t)width,
-																			(int32_t)height));
+																		(int32_t)width,
+																		(int32_t)height));
 }
 
 static void
@@ -2045,14 +2042,17 @@ prepare_initial_position(Client *c, const struct wlr_box *target, float scale)
 static void
 start_layout_animation(Client *c, Monitor *m, const struct wlr_box *target)
 {
+	struct wlr_box start;
+
 	if (c->close_pending)
 		return;
 
-	if (m->switch_animate)
+	if (m->switch_animate && !VISIBLEONTAGS(c, m, m->prevtagset))
 	{
 		c->opacity = 0.0f;
-		c->geom.x += m->switch_dir * m->m.width;
-		init_animation(c, target, &c->geom);
+		start = c->geom;
+		start.x += m->switch_dir * m->m.width;
+		init_animation(c, target, &start);
 		return;
 	}
 
@@ -2473,6 +2473,7 @@ void applyrules(Client *c)
 void arrange(Monitor *m)
 {
 	Client *c;
+	struct wlr_box target;
 
 	if (!m->wlr_output->enabled)
 		return;
@@ -2503,6 +2504,17 @@ void arrange(Monitor *m)
 
 	if (m->lt[m->sellt]->arrange)
 		m->lt[m->sellt]->arrange(m);
+
+	wl_list_for_each(c, &clients, link)
+	{
+		if (c->mon != m || !VISIBLEON(c, m) || c->close_pending)
+			continue;
+		if (m->lt[m->sellt]->arrange && !c->isfloating && !c->isfullscreen)
+			continue;
+
+		target = c->isfullscreen ? m->m : c->geom;
+		start_layout_animation(c, m, &target);
+	}
 	motionnotify(0, NULL, 0, 0, 0, 0);
 	checkidleinhibitor(NULL);
 }
@@ -2586,7 +2598,7 @@ void autostartexec(void)
 		{
 			setsid();
 			execvp(*p, (char *const *)p);
-			die("dwl: execvp %s:", *p);
+			die("newl: execvp %s:", *p);
 		}
 		while (*++p)
 			;
@@ -3699,7 +3711,7 @@ unset_fullscreen:
 void maximizenotify(struct wl_listener *listener, void *data)
 {
 	Client *c = wl_container_of(listener, c, maximize);
-	if (c->surface.xdg->initialized && wl_resource_get_version(c->surface.xdg->toplevel->resource) < XDG_TOPLEVEL_WM_CAPABILITIES_SINCE_VERSION)
+	if (c->surface.xdg->initialized)
 		wlr_xdg_surface_schedule_configure(c->surface.xdg);
 }
 
@@ -4137,8 +4149,8 @@ void setlayout(const Arg *arg)
 
 void setmonitortags(Monitor *m, uint32_t newtags, int toggle_tagset)
 {
-	uint32_t prev_tags;
-	int prev_index, new_index;
+	uint32_t added_tags, prev_tags;
+	int added_index, prev_index;
 
 	if (!m || !newtags || newtags == m->tagset[m->seltags])
 		return;
@@ -4147,12 +4159,14 @@ void setmonitortags(Monitor *m, uint32_t newtags, int toggle_tagset)
 	if (toggle_tagset)
 		m->seltags ^= 1;
 	m->tagset[m->seltags] = newtags;
+	m->prevtagset = prev_tags;
 
 	prev_index = prev_tags ? __builtin_ffs(prev_tags) - 1 : -1;
-	new_index = __builtin_ffs(newtags) - 1;
+	added_tags = newtags & ~prev_tags;
+	added_index = added_tags ? __builtin_ffs(added_tags) - 1 : -1;
 
-	m->switch_animate = (prev_index != new_index) ? 1 : 0;
-	m->switch_dir = (new_index > prev_index) ? 1 : -1;
+	m->switch_animate = 1;
+	m->switch_dir = (added_index >= 0 ? added_index : __builtin_ffs(newtags) - 1) > prev_index ? 1 : -1;
 
 	if (selmon == m)
 		focusclient(focustop(m), 1);
@@ -4500,10 +4514,7 @@ void toggleview(const Arg *arg)
 	if (!(newtagset = selmon ? selmon->tagset[selmon->seltags] ^ (arg->ui & TAGMASK) : 0))
 		return;
 
-	selmon->tagset[selmon->seltags] = newtagset;
-	focusclient(focustop(selmon), 1);
-	arrange(selmon);
-	printstatus();
+	setmonitortags(selmon, newtagset, 0);
 }
 
 void unlocksession(struct wl_listener *listener, void *data)
@@ -4857,9 +4868,9 @@ void xwaylandready(struct wl_listener *listener, void *data)
 	wlr_xwayland_set_seat(xwayland, seat);
 	if ((xcursor = wlr_xcursor_manager_get_xcursor(cursor_mgr, "default", 1)))
 		wlr_xwayland_set_cursor(xwayland,
-								xcursor->images[0]->buffer, xcursor->images[0]->width * 4,
-								xcursor->images[0]->width, xcursor->images[0]->height,
-								xcursor->images[0]->hotspot_x, xcursor->images[0]->hotspot_y);
+								wlr_xcursor_image_get_buffer(xcursor->images[0]),
+								xcursor->images[0]->hotspot_x,
+								xcursor->images[0]->hotspot_y);
 }
 #endif
 
