@@ -122,15 +122,12 @@ dwl-ipc-unstable-v2-protocol.c: protocols/dwl-ipc-unstable-v2.xml
 	$(WAYLAND_SCANNER) private-code \
 		protocols/dwl-ipc-unstable-v2.xml $@
 
-config.h:
-	cp config.def.h $@
-
 clean:
 	rm -f newl newl-debug *.o *-protocol.h *-protocol.c *.gcda *.gcno
 
 dist: clean
 	mkdir -p newl-$(VERSION)
-	cp -R LICENSE* Makefile CHANGELOG.md README.md config.def.h \
+	cp -R LICENSE* Makefile CHANGELOG.md README.md config.h \
 		config.mk protocols newl.1 newl.c newl.desktop \
 		newl-$(VERSION)
 	tar -caf newl-$(VERSION).tar.gz newl-$(VERSION)

@@ -21,8 +21,7 @@ Clone the repository and build newl:
 ```sh
 git clone https://github.com/voldtman/newl.git
 cd newl
-make
-sudo make install
+sudo make clean install
 ```
 
 Be sure to review the [Installation Guide](https://github.com/voldtman/newl#installation) on our GitHub page for detailed instructions and dependencies.

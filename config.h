@@ -2,7 +2,7 @@
                     ((hex >> 16) & 0xFF) / 255.0f, \
                     ((hex >> 8) & 0xFF) / 255.0f,  \
                     (hex & 0xFF) / 255.0f}
-#define ANIMATION_DURATION 800.0f // Animation duration in milliseconds
+#define ANIMATION_DURATION 400.0f // Animation duration in milliseconds
 
 static struct BezierCurve bezier = {
     .control_points = {
@@ -10,7 +10,6 @@ static struct BezierCurve bezier = {
         {0.05f, 0.9f},
         {0.1f, 1.05f},
         {1.0f, 1.0f}}};
-
 /* gaps */
 static int enablegaps = 1; /* enables gaps, used by togglegaps */
 static const unsigned int gaps = 10;
@@ -27,7 +26,6 @@ static int log_level = WLR_ERROR;
 
 static const char *const autostart[] = {
     "dbus-update-activation-environment", "--systemd", "WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP=newl", NULL,
-    "systemctl", "--user", "start", "hyprpolkitagent", NULL,
     "waybar", NULL,
     "iwqt", NULL,
     "swaybg", "-i", "/home/agam/.config/wallpaper.jpeg", "-m", "fill", NULL,
