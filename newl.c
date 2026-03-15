@@ -200,9 +200,16 @@ typedef struct
 typedef struct
 {
   struct wl_list link;
+  struct wlr_scene_rect *scene_rect;
+  float color[4];
+} CloseOverlayRect;
+typedef struct
+{
+  struct wl_list link;
   Monitor *mon;
   struct wlr_scene_tree *scene;
   struct wl_list buffers;
+  struct wl_list rects;
   struct wlr_box geom;
   struct timespec start_time;
 } CloseOverlay;
@@ -540,6 +547,8 @@ static void snapshot_close_overlay_buffer(struct wlr_scene_buffer *buffer, int s
                                           void *data);
 static void snapshot_close_overlay_tree(CloseOverlay *overlay,
                                         struct wlr_scene_tree *scene_tree, Client *client);
+static void transfer_client_borders_to_close_overlay(CloseOverlay *overlay,
+                                                     Client *client);
 static CloseOverlay *create_close_overlay_base(Monitor *mon,
                                                const struct wlr_box *geom);
 static void activate_close_overlay(CloseOverlay *overlay);
@@ -937,15 +946,20 @@ client_send_close(Client *c) {
 }
 
 static inline void
+scale_premultiplied_rgba(const float color[static 4], float opacity,
+                         float out[static 4]) {
+  out[0] = color[0] * opacity;
+  out[1] = color[1] * opacity;
+  out[2] = color[2] * opacity;
+  out[3] = color[3] * opacity;
+}
+
+static inline void
 client_set_border_color(Client *c, const float color[static 4]) {
-  float applied_color[4] = {
-      color[0],
-      color[1],
-      color[2],
-      color[3] * c->opacity,
-  };
+  float applied_color[4];
   int i;
 
+  scale_premultiplied_rgba(color, c->opacity, applied_color);
   for (i = 0; i < 4; i++) {
     if (c->border[i])
       wlr_scene_rect_set_color(c->border[i], applied_color);
@@ -1794,11 +1808,13 @@ client_create_scene(Client *c) {
 
 static void
 client_create_borders(Client *c) {
+  float initial_color[4];
   int i;
 
+  scale_premultiplied_rgba(c->isurgent ? urgentcolor : bordercolor,
+                           c->opacity, initial_color);
   for (i = 0; i < 4; i++) {
-    c->border[i] = wlr_scene_rect_create(c->scene, 0, 0,
-                                         c->isurgent ? urgentcolor : bordercolor);
+    c->border[i] = wlr_scene_rect_create(c->scene, 0, 0, initial_color);
     c->border[i]->node.data = c;
   }
   update_client_border_color(c);
@@ -2195,6 +2211,30 @@ snapshot_close_overlay_tree(CloseOverlay *overlay, struct wlr_scene_tree *scene_
 }
 
 static void
+transfer_client_borders_to_close_overlay(CloseOverlay *overlay, Client *client) {
+  CloseOverlayRect *rect;
+  int i, x, y;
+
+  if (!client)
+    return;
+
+  for (i = 0; i < 4; i++) {
+    if (!client->border[i])
+      continue;
+
+    wlr_scene_node_coords(&client->border[i]->node, &x, &y);
+    rect = ecalloc(1, sizeof(*rect));
+    rect->scene_rect = client->border[i];
+    memcpy(rect->color, client->border[i]->color, sizeof(rect->color));
+    wlr_scene_node_reparent(&client->border[i]->node, overlay->scene);
+    wlr_scene_node_set_position(&client->border[i]->node,
+                                x - overlay->geom.x, y - overlay->geom.y);
+    wl_list_insert(overlay->rects.prev, &rect->link);
+    client->border[i] = NULL;
+  }
+}
+
+static void
 activate_close_overlay(CloseOverlay *overlay) {
   apply_close_overlay_opacity(overlay, 1.0f);
   clock_gettime(CLOCK_MONOTONIC, &overlay->start_time);
@@ -2211,6 +2251,7 @@ create_close_overlay_base(Monitor *mon, const struct wlr_box *geom) {
   overlay->geom = *geom;
   overlay->scene = wlr_scene_tree_create(close_overlay_tree);
   wl_list_init(&overlay->buffers);
+  wl_list_init(&overlay->rects);
   wlr_scene_node_set_position(&overlay->scene->node, geom->x, geom->y);
   return overlay;
 }
@@ -2218,11 +2259,16 @@ create_close_overlay_base(Monitor *mon, const struct wlr_box *geom) {
 static void
 destroy_close_overlay(CloseOverlay *overlay) {
   CloseOverlayBuffer *buffer, *tmp;
+  CloseOverlayRect *rect, *rect_tmp;
 
   wl_list_remove(&overlay->link);
   wl_list_for_each_safe(buffer, tmp, &overlay->buffers, link) {
     wl_list_remove(&buffer->link);
     free(buffer);
+  }
+  wl_list_for_each_safe(rect, rect_tmp, &overlay->rects, link) {
+    wl_list_remove(&rect->link);
+    free(rect);
   }
   wlr_scene_node_destroy(&overlay->scene->node);
   free(overlay);
@@ -2231,21 +2277,15 @@ destroy_close_overlay(CloseOverlay *overlay) {
 static void
 apply_close_overlay_opacity(CloseOverlay *overlay, float opacity) {
   CloseOverlayBuffer *buffer;
+  CloseOverlayRect *rect;
+  float color[4];
 
   opacity = fmaxf(0.0f, fminf(opacity, 1.0f));
   wl_list_for_each(buffer, &overlay->buffers, link)
       wlr_scene_buffer_set_opacity(buffer->scene_buffer, buffer->opacity * opacity);
-}
-
-static void
-destroy_client_borders(Client *c) {
-  int i;
-
-  for (i = 0; i < 4; i++) {
-    if (!c->border[i])
-      continue;
-    wlr_scene_node_destroy(&c->border[i]->node);
-    c->border[i] = NULL;
+  wl_list_for_each(rect, &overlay->rects, link) {
+    scale_premultiplied_rgba(rect->color, opacity, color);
+    wlr_scene_rect_set_color(rect->scene_rect, color);
   }
 }
 
@@ -2254,6 +2294,7 @@ create_close_overlay(Client *c, const struct wlr_box *geom) {
   CloseOverlay *overlay = create_close_overlay_base(c->mon, geom);
 
   snapshot_close_overlay_tree(overlay, c->scene, c);
+  transfer_client_borders_to_close_overlay(overlay, c);
   activate_close_overlay(overlay);
 }
 
@@ -2306,7 +2347,6 @@ start_close_animation(Client *c) {
   c->opacity = sample.opacity;
   client_apply_scene_geometry(c, &sample.geom);
   apply_client_opacity(c, c->opacity);
-  destroy_client_borders(c);
   create_close_overlay(c, &c->geom);
   c->anim.active = 0;
   c->close_pending = 1;
@@ -4391,7 +4431,6 @@ void unmapnotify(struct wl_listener *listener, void *data) {
       c->opacity = sample.opacity;
       client_apply_scene_geometry(c, &c->geom);
       apply_client_opacity(c, c->opacity);
-      destroy_client_borders(c);
       create_close_overlay(c, &c->geom);
     }
 

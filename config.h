@@ -1,8 +1,14 @@
-#define COLOR(hex) {((hex >> 24) & 0xFF) / 255.0f, \
-                    ((hex >> 16) & 0xFF) / 255.0f, \
-                    ((hex >> 8) & 0xFF) / 255.0f,  \
-                    (hex & 0xFF) / 255.0f}
-#define ANIMATION_DURATION 400.0f // Animation duration in milliseconds
+#define COLOR_COMPONENT(hex, shift) (((hex >> shift) & 0xFF) / 255.0f)
+#define COLOR_ALPHA(hex) COLOR_COMPONENT(hex, 0)
+#define COLOR(hex) {COLOR_COMPONENT(hex, 24), \
+                    COLOR_COMPONENT(hex, 16), \
+                    COLOR_COMPONENT(hex, 8),  \
+                    COLOR_ALPHA(hex)}
+#define PREMULT_COLOR(hex) {COLOR_COMPONENT(hex, 24) * COLOR_ALPHA(hex), \
+                            COLOR_COMPONENT(hex, 16) * COLOR_ALPHA(hex), \
+                            COLOR_COMPONENT(hex, 8) * COLOR_ALPHA(hex),  \
+                            COLOR_ALPHA(hex)}
+#define ANIMATION_DURATION 1200.0f // Animation duration in milliseconds
 static const float initial_layout_animation_scale = 0.5f; // Set <= 0.0f to keep the initial size
 static struct BezierCurve bezier = {
     .control_points = {
@@ -17,9 +23,9 @@ static const unsigned int gaps = 10;
 static const int sloppyfocus = 1;               /* focus follows mouse */
 static const int bypass_surface_visibility = 0; /* 1 means idle inhibitors will disable idle tracking even if it's surface isn't visible  */
 static const unsigned int borderpx = 2;         /* border pixel of windows */
-static const float bordercolor[] = COLOR(0x999999ff);
-static const float focuscolor[] = COLOR(0xb4befeff);
-static const float urgentcolor[] = COLOR(0xb4befeff);
+static const float bordercolor[] = PREMULT_COLOR(0x99999980);
+static const float focuscolor[] = PREMULT_COLOR(0xb4befeff);
+static const float urgentcolor[] = PREMULT_COLOR(0xb4befeff);
 #define TAGCOUNT (9)
 
 static int log_level = WLR_ERROR;
