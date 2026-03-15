@@ -1,6 +1,6 @@
 # newl
 
-newl is a suckless wayland compositor based on DWL that doesn't suck in its looks department. 
+newl is a suckless wayland compositor based on DWL that doesn't suck in its eyecandy department. 
 
 
 ## Features
