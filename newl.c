@@ -75,7 +75,6 @@
 static void die(const char *fmt, ...);
 static void *ecalloc(size_t nmemb, size_t size);
 static int fd_set_nonblock(int fd);
-static void terminatechild(pid_t pid, int kill_group);
 
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 #define CLEANMASK(mask) (mask & ~WLR_MODIFIER_CAPS)
@@ -729,57 +728,6 @@ fd_set_nonblock(int fd) {
   return 0;
 }
 
-static void
-terminatechild(pid_t pid, int kill_group) {
-  static const struct timespec wait_step = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
-  int can_wait = 1;
-  int sigpid = kill_group ? -pid : pid;
-  int i;
-  pid_t result;
-
-  if (pid <= 0)
-    return;
-
-  result = waitpid(pid, NULL, WNOHANG);
-  if (result == pid)
-    return;
-  if (result < 0 && errno == ECHILD)
-    can_wait = 0;
-  else if (result < 0)
-    return;
-
-  if (kill(sigpid, SIGTERM) < 0 && errno != ESRCH)
-    return;
-
-  if (!can_wait)
-    goto sigkill;
-
-  for (i = 0; i < 50; i++) {
-    result = waitpid(pid, NULL, WNOHANG);
-    if (result == pid || (result < 0 && errno == ECHILD))
-      return;
-    if (result < 0 && errno != EINTR)
-      return;
-    nanosleep(&wait_step, NULL);
-  }
-
-sigkill:
-  if (kill(sigpid, SIGKILL) < 0 && errno != ESRCH)
-    return;
-
-  if (!can_wait)
-    return;
-
-  for (i = 0; i < 50; i++) {
-    result = waitpid(pid, NULL, WNOHANG);
-    if (result == pid || (result < 0 && errno == ECHILD))
-      return;
-    if (result < 0 && errno != EINTR)
-      return;
-    nanosleep(&wait_step, NULL);
-  }
-}
-
 static inline int
 client_is_x11(Client *c) {
 #ifdef XWAYLAND
@@ -803,34 +751,19 @@ client_prev_visible(Client *from, Monitor *m) {
 }
 
 static Client *
-first_visible_on_monitor(Monitor *m) {
-  Client *c;
-
-  wl_list_for_each(c, &clients, link) {
-    if (VISIBLEON(c, m))
-      return c;
-  }
-
-  return NULL;
-}
-
-static Client *
 focus_fallback_from(Client *anchor, Monitor *m) {
   Client *c;
-  struct wl_list *l;
 
   if ((c = client_prev_visible(anchor, m)))
     return c;
 
-  for (l = clients.prev; l != &clients; l = l->prev) {
-    c = wl_container_of(l, c, link);
+  wl_list_for_each_reverse(c, &clients, link) {
     if (c != anchor && VISIBLEON(c, m))
       return c;
   }
 
   return NULL;
 }
-
 static inline struct wlr_surface *
 client_surface(Client *c) {
 #ifdef XWAYLAND
@@ -2826,9 +2759,15 @@ void cleanup(void) {
 #endif
   wl_display_destroy_clients(dpy);
   for (i = 0; i < autostart_len; i++) {
-    terminatechild(autostart_pids[i], 1);
+    if (0 < autostart_pids[i]) {
+      kill(autostart_pids[i], SIGTERM);
+      waitpid(autostart_pids[i], NULL, 0);
+    }
   }
-  terminatechild(child_pid, 1);
+  if (child_pid > 0) {
+    kill(-child_pid, SIGTERM);
+    waitpid(child_pid, NULL, 0);
+  }
   wl_list_for_each_safe(overlay, tmp, &close_overlays, link)
       destroy_close_overlay(overlay);
   wlr_xcursor_manager_destroy(cursor_mgr);
@@ -3528,15 +3467,12 @@ void focusstack(const Arg *arg) {
 
 Client *
 focustop(Monitor *m) {
-  Client *c;
   if (focus_anchor) {
     if (VISIBLEON(focus_anchor, m))
       return focus_anchor;
-    if ((c = focus_fallback_from(focus_anchor, m)))
-      return c;
+    return focus_fallback_from(focus_anchor, m);
   }
-
-  return first_visible_on_monitor(m);
+  return NULL;
 }
 
 void fullscreennotify(struct wl_listener *listener, void *data) {
