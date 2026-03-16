@@ -1,3 +1,5 @@
+#include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <libinput.h>
 #include <linux/input-event-codes.h>
@@ -72,6 +74,8 @@
 
 static void die(const char *fmt, ...);
 static void *ecalloc(size_t nmemb, size_t size);
+static int fd_set_nonblock(int fd);
+static void terminatechild(pid_t pid, int kill_group);
 
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 #define CLEANMASK(mask) (mask & ~WLR_MODIFIER_CAPS)
@@ -571,6 +575,8 @@ static void defaultgaps(const Arg *arg);
 static void incgaps(const Arg *arg);
 
 static pid_t child_pid = -1;
+static pid_t *autostart_pids;
+static size_t autostart_len;
 static int locked;
 static void *exclusive_focus;
 static struct wl_display *dpy;
@@ -707,6 +713,72 @@ ecalloc(size_t nmemb, size_t size) {
   if (!(p = calloc(nmemb, size)))
     die("calloc:");
   return p;
+}
+
+static int
+fd_set_nonblock(int fd) {
+  int flags = fcntl(fd, F_GETFL);
+
+  if (flags < 0) {
+    perror("fcntl(F_GETFL):");
+    return -1;
+  }
+  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    perror("fcntl(F_SETFL):");
+    return -1;
+  }
+  return 0;
+}
+
+static void
+terminatechild(pid_t pid, int kill_group) {
+  static const struct timespec wait_step = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
+  int can_wait = 1;
+  int sigpid = kill_group ? -pid : pid;
+  int i;
+  pid_t result;
+
+  if (pid <= 0)
+    return;
+
+  result = waitpid(pid, NULL, WNOHANG);
+  if (result == pid)
+    return;
+  if (result < 0 && errno == ECHILD)
+    can_wait = 0;
+  else if (result < 0)
+    return;
+
+  if (kill(sigpid, SIGTERM) < 0 && errno != ESRCH)
+    return;
+
+  if (!can_wait)
+    goto sigkill;
+
+  for (i = 0; i < 50; i++) {
+    result = waitpid(pid, NULL, WNOHANG);
+    if (result == pid || (result < 0 && errno == ECHILD))
+      return;
+    if (result < 0 && errno != EINTR)
+      return;
+    nanosleep(&wait_step, NULL);
+  }
+
+sigkill:
+  if (kill(sigpid, SIGKILL) < 0 && errno != ESRCH)
+    return;
+
+  if (!can_wait)
+    return;
+
+  for (i = 0; i < 50; i++) {
+    result = waitpid(pid, NULL, WNOHANG);
+    if (result == pid || (result < 0 && errno == ECHILD))
+      return;
+    if (result < 0 && errno != EINTR)
+      return;
+    nanosleep(&wait_step, NULL);
+  }
 }
 
 static inline int
@@ -1027,9 +1099,6 @@ client_wants_fullscreen(Client *c) {
 #endif
   return c->surface.xdg->toplevel->requested.fullscreen;
 }
-
-static pid_t *autostart_pids;
-static size_t autostart_len;
 
 void swipe_begin(struct wl_listener *listener, void *data) {
   struct wlr_pointer_swipe_begin_event *event = data;
@@ -2714,18 +2783,10 @@ void cleanup(void) {
   xwayland = NULL;
 #endif
   wl_display_destroy_clients(dpy);
-
   for (i = 0; i < autostart_len; i++) {
-    if (0 < autostart_pids[i]) {
-      kill(autostart_pids[i], SIGTERM);
-      waitpid(autostart_pids[i], NULL, 0);
-    }
+    terminatechild(autostart_pids[i], 1);
   }
-
-  if (child_pid > 0) {
-    kill(-child_pid, SIGTERM);
-    waitpid(child_pid, NULL, 0);
-  }
+  terminatechild(child_pid, 1);
   wl_list_for_each_safe(overlay, tmp, &close_overlays, link)
       destroy_close_overlay(overlay);
   wlr_xcursor_manager_destroy(cursor_mgr);
@@ -3950,6 +4011,9 @@ void run(char *startup_cmd) {
     close(piperw[1]);
     close(piperw[0]);
   }
+
+  if (fd_set_nonblock(STDOUT_FILENO) < 0)
+    close(STDOUT_FILENO);
 
   printstatus();
 

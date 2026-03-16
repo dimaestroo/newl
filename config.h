@@ -8,7 +8,7 @@
                             COLOR_COMPONENT(hex, 16) * COLOR_ALPHA(hex), \
                             COLOR_COMPONENT(hex, 8) * COLOR_ALPHA(hex),  \
                             COLOR_ALPHA(hex)}
-#define ANIMATION_DURATION 1200.0f // Animation duration in milliseconds
+#define ANIMATION_DURATION 400.0f // Animation duration in milliseconds
 static const float initial_layout_animation_scale = 0.5f; // Set <= 0.0f to keep the initial size
 static struct BezierCurve bezier = {
     .control_points = {
