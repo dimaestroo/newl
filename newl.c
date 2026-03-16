@@ -156,7 +156,6 @@ typedef struct
   struct wlr_scene_rect *border[4];
   struct wlr_scene_tree *scene_surface;
   struct wl_list link;
-  struct wl_list flink;
   struct wlr_box geom;
   struct wlr_box current_geom;
   struct wlr_box prev;
@@ -599,7 +598,7 @@ static struct wlr_xdg_activation_v1 *activation;
 static struct wlr_xdg_decoration_manager_v1 *xdg_decoration_mgr;
 static struct wl_list clients;
 static struct wl_list close_overlays;
-static struct wl_list fstack;
+static Client *focus_anchor;
 static struct wlr_idle_notifier_v1 *idle_notifier;
 static struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
 static struct wlr_layer_shell_v1 *layer_shell;
@@ -787,6 +786,49 @@ client_is_x11(Client *c) {
   return c->type == X11;
 #endif
   return 0;
+}
+
+static Client *
+client_prev_visible(Client *from, Monitor *m) {
+  Client *c;
+  struct wl_list *l;
+
+  for (l = from->link.prev; l != &clients; l = l->prev) {
+    c = wl_container_of(l, c, link);
+    if (VISIBLEON(c, m))
+      return c;
+  }
+
+  return NULL;
+}
+
+static Client *
+first_visible_on_monitor(Monitor *m) {
+  Client *c;
+
+  wl_list_for_each(c, &clients, link) {
+    if (VISIBLEON(c, m))
+      return c;
+  }
+
+  return NULL;
+}
+
+static Client *
+focus_fallback_from(Client *anchor, Monitor *m) {
+  Client *c;
+  struct wl_list *l;
+
+  if ((c = client_prev_visible(anchor, m)))
+    return c;
+
+  for (l = clients.prev; l != &clients; l = l->prev) {
+    c = wl_container_of(l, c, link);
+    if (c != anchor && VISIBLEON(c, m))
+      return c;
+  }
+
+  return NULL;
 }
 
 static inline struct wlr_surface *
@@ -1694,6 +1736,7 @@ client_init_common(Client *c, unsigned int type, unsigned int bw,
   c->bw = bw;
   c->opacity = 1.0f;
   c->initial_position = initial_position;
+  wl_list_init(&c->link);
   wl_list_init(&c->commit.link);
   wl_list_init(&c->map.link);
   wl_list_init(&c->unmap.link);
@@ -1917,7 +1960,6 @@ client_finish_managed_map(Client *c, Client *parent) {
   client_create_borders(c);
   client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
   wl_list_insert(clients.prev, &c->link);
-  wl_list_insert(fstack.prev, &c->flink);
 
   if (parent) {
     c->isfloating = 1;
@@ -3330,6 +3372,8 @@ void destroylocksurface(struct wl_listener *listener, void *data) {
 
 void destroynotify(struct wl_listener *listener, void *data) {
   Client *c = wl_container_of(listener, c, destroy);
+  if (c == focus_anchor)
+    focus_anchor = NULL;
   client_clear_pending_configure(c);
   wl_list_remove(&c->destroy.link);
   wl_list_remove(&c->set_title.link);
@@ -3407,14 +3451,11 @@ void focusclient(Client *c, int lift) {
   Client *old_c = NULL;
   LayerSurface *old_l = NULL;
 
-  if (locked)
+  if (locked || (c && client_surface(c) == old))
     return;
 
   if (c && lift)
     wlr_scene_node_raise_to_top(&c->scene->node);
-
-  if (c && client_surface(c) == old)
-    return;
 
   if ((old_client_type = toplevel_from_wlr_surface(old, &old_c, &old_l)) == XDGShell) {
     struct wlr_xdg_popup *popup, *tmp;
@@ -3423,8 +3464,7 @@ void focusclient(Client *c, int lift) {
   }
 
   if (c && !client_is_unmanaged(c)) {
-    wl_list_remove(&c->flink);
-    wl_list_insert(&fstack, &c->flink);
+    focus_anchor = c;
     selmon = c->mon;
     c->isurgent = 0;
 
@@ -3489,11 +3529,14 @@ void focusstack(const Arg *arg) {
 Client *
 focustop(Monitor *m) {
   Client *c;
-  wl_list_for_each(c, &fstack, flink) {
-    if (VISIBLEON(c, m))
+  if (focus_anchor) {
+    if (VISIBLEON(focus_anchor, m))
+      return focus_anchor;
+    if ((c = focus_fallback_from(focus_anchor, m)))
       return c;
   }
-  return NULL;
+
+  return first_visible_on_monitor(m);
 }
 
 void fullscreennotify(struct wl_listener *listener, void *data) {
@@ -4231,7 +4274,6 @@ void setup(void) {
   wl_signal_add(&backend->events.new_output, &new_output);
 
   wl_list_init(&clients);
-  wl_list_init(&fstack);
 
   xdg_shell = wlr_xdg_shell_create(dpy, 6);
   wl_signal_add(&xdg_shell->events.new_toplevel, &new_xdg_toplevel);
@@ -4499,9 +4541,11 @@ void unmapnotify(struct wl_listener *listener, void *data) {
     }
 
     c->anim.active = 0;
+    if (c == focus_anchor)
+      focus_anchor = focus_fallback_from(c, c->mon);
+
     wl_list_remove(&c->link);
     setmon(c, NULL, 0);
-    wl_list_remove(&c->flink);
   }
 
   wlr_scene_node_destroy(&c->scene->node);
