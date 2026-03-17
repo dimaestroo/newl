@@ -789,26 +789,14 @@ client_is_x11(Client *c) {
 }
 
 static Client *
-client_prev_visible(Client *from, Monitor *m) {
+focus_fallback_from(Client *anchor, Monitor *m) {
   Client *c;
   struct wl_list *l;
-
-  for (l = from->link.prev; l != &clients; l = l->prev) {
+  for (l = anchor->link.prev; l != &clients; l = l->prev) {
     c = wl_container_of(l, c, link);
     if (VISIBLEON(c, m))
       return c;
   }
-
-  return NULL;
-}
-
-static Client *
-focus_fallback_from(Client *anchor, Monitor *m) {
-  Client *c;
-
-  if ((c = client_prev_visible(anchor, m)))
-    return c;
-
   wl_list_for_each_reverse(c, &clients, link) {
     if (c != anchor && VISIBLEON(c, m))
       return c;
