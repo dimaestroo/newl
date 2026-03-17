@@ -480,7 +480,6 @@ static void set_layer_surface_geom(LayerSurface *l, const struct wlr_box *geom);
 static void apply_client_opacity(Client *c, float opacity);
 static void apply_layer_surface_opacity(LayerSurface *l, float opacity);
 static const float *client_border_base_color(Client *c);
-static void update_client_border_color(Client *c);
 static void get_projected_animation_box(const Animation *anim, struct wlr_box *projected);
 static void client_apply_visual_geometry(Client *c, const struct wlr_box *geo);
 static void client_apply_scene_geometry(Client *c, const struct wlr_box *geo);
@@ -604,6 +603,7 @@ static struct wlr_cursor *cursor;
 static struct wlr_xcursor_manager *cursor_mgr;
 
 static struct wlr_session_lock_manager_v1 *session_lock_mgr;
+static int suppress_arrange = 0;
 static struct wlr_scene_rect *locked_bg;
 static struct wlr_session_lock_v1 *cur_lock;
 
@@ -1538,13 +1538,6 @@ client_border_base_color(Client *c) {
 }
 
 static void
-update_client_border_color(Client *c) {
-  if (!c->border[0])
-    return;
-  client_set_border_color(c, client_border_base_color(c));
-}
-
-static void
 apply_client_opacity(Client *c, float opacity) {
   if (!c->scene)
     return;
@@ -1552,7 +1545,7 @@ apply_client_opacity(Client *c, float opacity) {
   c->opacity = fmaxf(0.0f, fminf(opacity, 1.0f));
   wlr_scene_node_for_each_buffer(&c->scene->node, set_scene_buffer_opacity,
                                  &c->opacity);
-  update_client_border_color(c);
+  client_set_border_color(c, client_border_base_color(c));
 }
 
 static void
@@ -1846,7 +1839,7 @@ client_create_borders(Client *c) {
     c->border[i] = wlr_scene_rect_create(c->scene, 0, 0, initial_color);
     c->border[i]->node.data = c;
   }
-  update_client_border_color(c);
+  client_set_border_color(c, client_border_base_color(c));
 }
 
 static void
@@ -1993,21 +1986,33 @@ start_animation_at(Client *c, const struct wlr_box *target, const struct wlr_box
                    float target_opacity, const struct timespec *start_time) {
   int pre_resize = 0;
 
-  if (!start && c->anim.active && wlr_box_equal(&c->anim.target, target) && c->anim.target_opacity == target_opacity) {
+  if (!start && c->anim.active && wlr_box_equal(&c->anim.target, target) &&
+      c->anim.target_opacity == target_opacity) {
     if (c->mon && c->mon->wlr_output)
       wlr_output_schedule_frame(c->mon->wlr_output);
     return;
   }
 
-  c->anim.start = start ? *start : c->geom;
+  if (start) {
+    c->anim.start = *start;
+    c->anim.start_opacity = c->opacity;
+  } else if (c->anim.active) {
+    sample_animation_state(&c->anim, NULL, &c->anim.start,
+                           &c->anim.start_opacity, NULL, NULL);
+  } else {
+    c->anim.start = c->geom;
+    c->anim.start_opacity = c->opacity;
+  }
+
   c->anim.target = *target;
-  c->anim.start_opacity = c->opacity;
   c->anim.target_opacity = target_opacity;
   c->anim.projected = *target;
   get_projected_animation_box(&c->anim, &c->anim.projected);
-  pre_resize = c->anim.projected.width > c->anim.target.width || c->anim.projected.height > c->anim.target.height;
+  pre_resize = c->anim.projected.width > c->anim.target.width ||
+               c->anim.projected.height > c->anim.target.height;
 
-  if (wlr_box_equal(&c->anim.start, target) && c->anim.start_opacity == c->anim.target_opacity) {
+  if (wlr_box_equal(&c->anim.start, target) &&
+      c->anim.start_opacity == c->anim.target_opacity) {
     c->anim.active = 0;
     apply_client_opacity(c, c->anim.target_opacity);
     return;
@@ -2448,10 +2453,11 @@ void pushlasttop(const Arg *arg) {
   if (!selmon)
     return;
 
-  wl_list_for_each(c, &clients, link) {
+  wl_list_for_each_reverse(c, &clients, link) {
     if (!VISIBLEON(c, selmon) || c->isfloating || c->isfullscreen)
       continue;
     last = c;
+    break;
   }
 
   if (last) {
@@ -3994,8 +4000,10 @@ void setfloating(Client *c, int floating) {
                                                       ? LyrFS
                                                   : c->isfloating ? LyrFloat
                                                                   : LyrTile]);
-  arrange(c->mon);
-  printstatus();
+  if (!suppress_arrange) {
+    arrange(c->mon);
+    printstatus();
+  }
 }
 
 void setfullscreen(Client *c, int fullscreen) {
@@ -4015,8 +4023,10 @@ void setfullscreen(Client *c, int fullscreen) {
   } else {
     start_animation_at(c, &c->prev, NULL, 1.0f, NULL);
   }
-  arrange(c->mon);
-  printstatus();
+  if (!suppress_arrange) {
+    arrange(c->mon);
+    printstatus();
+  }
 }
 
 void setlayout(const Arg *arg) {
@@ -4088,8 +4098,12 @@ void setmon(Client *c, Monitor *m, uint32_t newtags) {
   if (m) {
     client_request_geometry(c, &c->geom, 0);
     c->tags = newtags ? newtags : m->tagset[m->seltags];
+    suppress_arrange++;
     setfullscreen(c, c->isfullscreen);
     setfloating(c, c->isfloating);
+    suppress_arrange--;
+    arrange(m);
+    printstatus();
   }
   focusclient(focustop(selmon), 1);
 }
