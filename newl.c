@@ -143,13 +143,6 @@ typedef struct
 } Animation;
 typedef struct
 {
-  struct wlr_box geom;
-  float opacity;
-  float progress;
-  float eased_progress;
-} AnimationSample;
-typedef struct
-{
   unsigned int type;
   Monitor *mon;
   struct wlr_scene_tree *scene;
@@ -471,25 +464,19 @@ static void init_bezier(void);
 static float get_x_for_t(const struct BezierCurve *curve, float t);
 static float get_y_for_t(const struct BezierCurve *curve, float t);
 static float get_y_for_point(const struct BezierCurve *curve, float x);
-static float get_animation_opacity(const Animation *anim, float t);
 static void sample_animation_timing(const struct timespec *start_time,
                                     const struct timespec *now,
-                                    AnimationSample *sample);
+                                    float *progress, float *eased_progress);
 static void sample_animation(const Animation *anim, float t, struct wlr_box *geom,
                              float *opacity);
 static void sample_animation_state(const Animation *anim, const struct timespec *now,
-                                   AnimationSample *sample);
-static void sample_client_animation(Client *c, const struct timespec *now,
-                                    AnimationSample *sample);
-static void get_current_client_visual_state(Client *c, const struct timespec *now,
-                                            struct wlr_box *geom, float *opacity);
+                                   struct wlr_box *geom, float *opacity,
+                                   float *progress, float *eased_progress);
 static int client_is_switch_exiting(Client *c);
 static void get_client_settled_geometry(Client *c, struct wlr_box *geom);
 static int get_monitor_switch_offset(Monitor *m, uint32_t tags);
 static void get_layer_surface_geom(LayerSurface *l, struct wlr_box *geom);
 static void set_layer_surface_geom(LayerSurface *l, const struct wlr_box *geom);
-static void sample_layer_surface_animation(LayerSurface *l, const struct timespec *now,
-                                           AnimationSample *sample);
 static void apply_client_opacity(Client *c, float opacity);
 static void apply_layer_surface_opacity(LayerSurface *l, float opacity);
 static const float *client_border_base_color(Client *c);
@@ -797,13 +784,9 @@ focus_fallback_from(Client *anchor, Monitor *m) {
     if (VISIBLEON(c, m))
       return c;
   }
-  wl_list_for_each_reverse(c, &clients, link) {
-    if (c != anchor && VISIBLEON(c, m))
-      return c;
-  }
-
   return NULL;
 }
+
 static inline struct wlr_surface *
 client_surface(Client *c) {
 #ifdef XWAYLAND
@@ -1431,16 +1414,13 @@ float get_y_for_point(const struct BezierCurve *curve, float x) {
   return lower_point->y + (upper_point->y - lower_point->y) * perc_in_delta;
 }
 
-static float
-get_animation_opacity(const Animation *anim, float t) {
-  return anim->start_opacity + (anim->target_opacity - anim->start_opacity) * t;
-}
-
 static void
 sample_animation_timing(const struct timespec *start_time, const struct timespec *now,
-                        AnimationSample *sample) {
-  sample->progress = ((now->tv_sec - start_time->tv_sec) * 1000 + (now->tv_nsec - start_time->tv_nsec) / 1000000) / ANIMATION_DURATION;
-  sample->eased_progress = get_y_for_point(&bezier, sample->progress);
+                        float *progress, float *eased_progress) {
+  *progress = ((now->tv_sec - start_time->tv_sec) * 1000 +
+               (now->tv_nsec - start_time->tv_nsec) / 1000000) /
+              ANIMATION_DURATION;
+  *eased_progress = get_y_for_point(&bezier, *progress);
 }
 
 static void
@@ -1453,46 +1433,28 @@ sample_animation(const Animation *anim, float t, struct wlr_box *geom, float *op
   }
 
   if (opacity)
-    *opacity = get_animation_opacity(anim, t);
+    *opacity = anim->start_opacity + (anim->target_opacity - anim->start_opacity) * t;
 }
 
 static void
 sample_animation_state(const Animation *anim, const struct timespec *now,
-                       AnimationSample *sample) {
-  sample_animation_timing(&anim->start_time, now, sample);
-  sample_animation(anim, sample->eased_progress, &sample->geom, &sample->opacity);
-}
+                       struct wlr_box *geom, float *opacity,
+                       float *progress, float *eased_progress) {
+  float local_progress, local_eased_progress;
+  struct timespec local_now;
 
-static void
-sample_client_animation(Client *c, const struct timespec *now, AnimationSample *sample) {
-  if (!c->anim.active) {
-    sample->geom = c->current_geom.width > 0 && c->current_geom.height > 0
-                       ? c->current_geom
-                       : c->geom;
-    sample->opacity = c->opacity;
-    sample->progress = 1.0f;
-    sample->eased_progress = 1.0f;
-    return;
+  if (!now) {
+    clock_gettime(CLOCK_MONOTONIC, &local_now);
+    now = &local_now;
   }
 
-  sample_animation_state(&c->anim, now, sample);
-}
-
-static void
-get_current_client_visual_state(Client *c, const struct timespec *now,
-                                struct wlr_box *geom, float *opacity) {
-  AnimationSample sample;
-  struct timespec sample_time;
-
-  if (now)
-    sample_time = *now;
-  else
-    clock_gettime(CLOCK_MONOTONIC, &sample_time);
-  sample_client_animation(c, &sample_time, &sample);
-  if (geom)
-    *geom = sample.geom;
-  if (opacity)
-    *opacity = sample.opacity;
+  sample_animation_timing(&anim->start_time, now, &local_progress,
+                          &local_eased_progress);
+  sample_animation(anim, local_eased_progress, geom, opacity);
+  if (progress)
+    *progress = local_progress;
+  if (eased_progress)
+    *eased_progress = local_eased_progress;
 }
 
 static int
@@ -1527,7 +1489,7 @@ get_monitor_switch_offset(Monitor *m, uint32_t tags) {
     if (!c->is_tag_switch_anim || !c->anim.active || c->hide_on_anim_end)
       continue;
 
-    get_current_client_visual_state(c, &m->switch_start_time, &current_geom, NULL);
+    sample_animation_state(&c->anim, &m->switch_start_time, &current_geom, NULL, NULL, NULL);
     get_client_settled_geometry(c, &settled_geom);
     offset_sum += current_geom.x - settled_geom.x;
     samples++;
@@ -1552,20 +1514,6 @@ set_layer_surface_geom(LayerSurface *l, const struct wlr_box *geom) {
   l->geom = *geom;
   wlr_scene_node_set_position(&l->scene->node, geom->x, geom->y);
   wlr_scene_node_set_position(&l->popups->node, geom->x, geom->y);
-}
-
-static void
-sample_layer_surface_animation(LayerSurface *l, const struct timespec *now,
-                               AnimationSample *sample) {
-  if (!l->anim.active) {
-    sample->geom = l->geom;
-    sample->opacity = l->opacity;
-    sample->progress = 1.0f;
-    sample->eased_progress = 1.0f;
-    return;
-  }
-
-  sample_animation_state(&l->anim, now, sample);
 }
 
 static void
@@ -1691,15 +1639,13 @@ client_apply_current_visual_geometry(Client *c, const struct wlr_box *current,
 
 static void
 client_apply_sampled_opacity(Client *c) {
-  AnimationSample sample;
-  struct timespec now;
+  float opacity;
 
   if (!c->scene)
     return;
 
-  clock_gettime(CLOCK_MONOTONIC, &now);
-  sample_client_animation(c, &now, &sample);
-  apply_client_opacity(c, sample.opacity);
+  sample_animation_state(&c->anim, NULL, NULL, &opacity, NULL, NULL);
+  apply_client_opacity(c, opacity);
 }
 
 static void
@@ -1742,21 +1688,20 @@ static void
 client_get_requested_surface_size(Client *c, const struct wlr_box *geo,
                                   const struct wlr_box *prev,
                                   uint32_t *width, uint32_t *height) {
-  struct wlr_box requested = *geo;
-
-  if (c->anim.active) {
-    requested.width = prev && c->anim.projected.width > c->anim.target.width && geo->width < prev->width
-                          ? MAX(requested.width, c->anim.target.width)
-                          : MAX(requested.width,
-                                MAX(c->anim.target.width, c->anim.projected.width));
-    requested.height = prev && c->anim.projected.height > c->anim.target.height && geo->height < prev->height
-                           ? MAX(requested.height, c->anim.target.height)
-                           : MAX(requested.height,
-                                 MAX(c->anim.target.height, c->anim.projected.height));
-  }
-
-  *width = MAX(requested.width, 1 + 2 * (int)c->bw) - 2 * c->bw;
-  *height = MAX(requested.height, 1 + 2 * (int)c->bw) - 2 * c->bw;
+  *width = MAX(c->anim.active ? prev && c->anim.projected.width > c->anim.target.width && geo->width < prev->width
+                                    ? MAX(geo->width, c->anim.target.width)
+                                    : MAX(geo->width,
+                                          MAX(c->anim.target.width, c->anim.projected.width))
+                              : geo->width,
+               1 + 2 * (int)c->bw) -
+           2 * c->bw;
+  *height = MAX(c->anim.active ? prev && c->anim.projected.height > c->anim.target.height && geo->height < prev->height
+                                     ? MAX(geo->height, c->anim.target.height)
+                                     : MAX(geo->height,
+                                           MAX(c->anim.target.height, c->anim.projected.height))
+                               : geo->height,
+                1 + 2 * (int)c->bw) -
+            2 * c->bw;
 }
 
 #ifdef XWAYLAND
@@ -1783,7 +1728,6 @@ client_clear_pending_configure(Client *c) {
 static int
 client_handle_configure_timeout(void *data) {
   Client *c = data;
-
   if (!c->pending_configure_serial)
     return 0;
 
@@ -2000,6 +1944,7 @@ static void
 client_request_geometry(Client *c, const struct wlr_box *geo, int interact) {
   struct wlr_box prev = c->geom;
   int size_changed;
+  int has_current;
 
   if (interact)
     c->anim.active = 0;
@@ -2014,6 +1959,7 @@ client_request_geometry(Client *c, const struct wlr_box *geo, int interact) {
   }
 
   size_changed = geo->width != prev.width || geo->height != prev.height;
+  has_current = c->current_geom.width > 0 && c->current_geom.height > 0;
 
 #ifdef XWAYLAND
   if (client_is_x11(c)) {
@@ -2023,9 +1969,7 @@ client_request_geometry(Client *c, const struct wlr_box *geo, int interact) {
                                       &width, &height);
     client_configure_x11_surface(c, geo, width, height);
     if (!size_changed) {
-      struct wlr_box current = c->current_geom.width > 0 && c->current_geom.height > 0
-                                   ? c->current_geom
-                                   : *geo;
+      struct wlr_box current = has_current ? c->current_geom : *geo;
       current.x = geo->x;
       current.y = geo->y;
       client_apply_current_visual_geometry(c, &current, geo, interact);
@@ -2037,9 +1981,7 @@ client_request_geometry(Client *c, const struct wlr_box *geo, int interact) {
   if (size_changed) {
     client_request_surface_size(c, geo, &prev);
   } else if (!c->pending_configure_serial) {
-    struct wlr_box current = c->current_geom.width > 0 && c->current_geom.height > 0
-                                 ? c->current_geom
-                                 : *geo;
+    struct wlr_box current = has_current ? c->current_geom : *geo;
     current.x = geo->x;
     current.y = geo->y;
     client_apply_current_visual_geometry(c, &current, geo, interact);
@@ -2156,8 +2098,7 @@ static void
 start_tag_switch_exit_animation(Client *c, Monitor *m) {
   struct wlr_box restore, start, target;
   float start_opacity;
-
-  get_current_client_visual_state(c, &m->switch_start_time, &start, &start_opacity);
+  sample_animation_state(&c->anim, &m->switch_start_time, &start, &start_opacity, NULL, NULL);
   get_client_settled_geometry(c, &restore);
   c->opacity = start_opacity;
   c->restore_geom = restore;
@@ -2220,8 +2161,6 @@ start_layer_surface_animation(LayerSurface *l, const struct wlr_box *target,
 
 static void
 retarget_layer_surface(LayerSurface *l, const struct wlr_box *target) {
-  AnimationSample sample;
-  struct timespec now;
   struct wlr_box start;
   float start_opacity;
 
@@ -2236,10 +2175,7 @@ retarget_layer_surface(LayerSurface *l, const struct wlr_box *target) {
     start_opacity = 0.0f;
     l->initial_position = 0;
   } else if (l->anim.active) {
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    sample_layer_surface_animation(l, &now, &sample);
-    start = sample.geom;
-    start_opacity = sample.opacity;
+    sample_animation_state(&l->anim, NULL, &start, &start_opacity, NULL, NULL);
   } else {
     start = l->geom;
     start_opacity = l->opacity;
@@ -2412,24 +2348,12 @@ cancel_tag_switch_exit_animations(Monitor *m) {
 
 static void
 start_close_animation(Client *c) {
-  AnimationSample sample;
-  struct timespec now;
-
-  if (c->close_pending) {
+  if (c->close_pending || !c->mon || !client_surface(c)->mapped) {
     client_send_close(c);
     return;
   }
-
-  if (!c->mon || !client_surface(c)->mapped) {
-    client_send_close(c);
-    return;
-  }
-
-  clock_gettime(CLOCK_MONOTONIC, &now);
-  sample_client_animation(c, &now, &sample);
-  c->geom = sample.geom;
-  c->opacity = sample.opacity;
-  client_apply_scene_geometry(c, &sample.geom);
+  sample_animation_state(&c->anim, NULL, &c->geom, &c->opacity, NULL, NULL);
+  client_apply_scene_geometry(c, &c->geom);
   apply_client_opacity(c, c->opacity);
   create_close_overlay(c, &c->geom);
   c->anim.active = 0;
@@ -2442,10 +2366,11 @@ start_close_animation(Client *c) {
 
 static int
 step_client_animation_frame(Client *c, const struct timespec *now) {
-  AnimationSample sample;
+  struct wlr_box geom;
+  float opacity, progress;
 
-  sample_client_animation(c, now, &sample);
-  if (sample.progress >= 1.0f) {
+  sample_animation_state(&c->anim, now, &geom, &opacity, &progress, NULL);
+  if (progress >= 1.0f) {
     c->anim.active = 0;
     c->is_tag_switch_anim = 0;
     if (c->hide_on_anim_end) {
@@ -2469,20 +2394,21 @@ step_client_animation_frame(Client *c, const struct timespec *now) {
     return 0;
   }
 
-  client_request_geometry(c, &sample.geom, 0);
-  client_apply_visual_geometry(c, &sample.geom);
-  apply_client_opacity(c, sample.opacity);
+  client_request_geometry(c, &geom, 0);
+  client_apply_visual_geometry(c, &geom);
+  apply_client_opacity(c, opacity);
   return 1;
 }
 
 static int
 step_layer_surface_animation_frame(LayerSurface *l, const struct timespec *now) {
-  AnimationSample sample;
+  struct wlr_box geom;
+  float opacity, progress;
 
-  sample_layer_surface_animation(l, now, &sample);
-  set_layer_surface_geom(l, &sample.geom);
-  apply_layer_surface_opacity(l, sample.opacity);
-  if (sample.progress >= 1.0f) {
+  sample_animation_state(&l->anim, now, &geom, &opacity, &progress, NULL);
+  set_layer_surface_geom(l, &geom);
+  apply_layer_surface_opacity(l, opacity);
+  if (progress >= 1.0f) {
     l->anim.active = 0;
     set_layer_surface_geom(l, &l->anim.target);
     apply_layer_surface_opacity(l, l->anim.target_opacity);
@@ -2494,15 +2420,15 @@ step_layer_surface_animation_frame(LayerSurface *l, const struct timespec *now) 
 
 static int
 step_close_overlay_frame(CloseOverlay *overlay, const struct timespec *now) {
-  AnimationSample sample;
+  float progress, eased_progress;
 
-  sample_animation_timing(&overlay->start_time, now, &sample);
-  if (sample.progress >= 1.0f) {
+  sample_animation_timing(&overlay->start_time, now, &progress, &eased_progress);
+  if (progress >= 1.0f) {
     destroy_close_overlay(overlay);
     return 0;
   }
 
-  apply_close_overlay_opacity(overlay, 1.0f - sample.eased_progress);
+  apply_close_overlay_opacity(overlay, 1.0f - eased_progress);
   return 1;
 }
 
@@ -2915,9 +2841,8 @@ void commitlayersurfacenotify(struct wl_listener *listener, void *data) {
   LayerSurface *l = wl_container_of(listener, l, surface_commit);
   struct wlr_layer_surface_v1 *layer_surface = l->layer_surface;
   struct wlr_scene_tree *scene_layer = layers[layermap[layer_surface->current.layer]];
-  AnimationSample sample;
+  float opacity;
   struct wlr_layer_surface_v1_state old_state;
-  struct timespec now;
 
   if (l->layer_surface->initial_commit) {
     client_set_scale(layer_surface->surface, l->mon->wlr_output->scale);
@@ -2940,9 +2865,8 @@ void commitlayersurfacenotify(struct wl_listener *listener, void *data) {
   }
 
   arrangelayers(l->mon);
-  clock_gettime(CLOCK_MONOTONIC, &now);
-  sample_layer_surface_animation(l, &now, &sample);
-  apply_layer_surface_opacity(l, sample.opacity);
+  sample_animation_state(&l->anim, NULL, NULL, &opacity, NULL, NULL);
+  apply_layer_surface_opacity(l, opacity);
 }
 
 void commitnotify(struct wl_listener *listener, void *data) {
@@ -3501,10 +3425,16 @@ void focusstack(const Arg *arg) {
 
 Client *
 focustop(Monitor *m) {
+  Client *c;
   if (focus_anchor) {
     if (VISIBLEON(focus_anchor, m))
       return focus_anchor;
-    return focus_fallback_from(focus_anchor, m);
+    if ((c = focus_fallback_from(focus_anchor, m)))
+      return c;
+  }
+  wl_list_for_each_reverse(c, &clients, link) {
+    if (VISIBLEON(c, m))
+      return c;
   }
   return NULL;
 }
@@ -4380,18 +4310,15 @@ void tile(Monitor *m) {
 
   if (n == 0)
     return;
-
   if (n > 1)
     mw = (int)((m->w.width - m->gaps * enablegaps) * m->mfact);
   else
     mw = m->w.width - m->gaps * enablegaps;
-
   master_y = stack_y = m->w.y + m->gaps * enablegaps;
 
   wl_list_for_each(c, &clients, link) {
     if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
       continue;
-
     if (i == 0) {
       target = (struct wlr_box){
           .x = m->w.x + m->gaps * enablegaps,
@@ -4454,15 +4381,10 @@ void unlocksession(struct wl_listener *listener, void *data) {
 }
 
 void unmaplayersurfacenotify(struct wl_listener *listener, void *data) {
-  AnimationSample sample;
   LayerSurface *l = wl_container_of(listener, l, unmap);
-  struct timespec now;
 
   if (l->mapped && l->scene) {
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    sample_layer_surface_animation(l, &now, &sample);
-    l->geom = sample.geom;
-    l->opacity = sample.opacity;
+    sample_animation_state(&l->anim, NULL, &l->geom, &l->opacity, NULL, NULL);
     set_layer_surface_geom(l, &l->geom);
     apply_layer_surface_opacity(l, l->opacity);
     create_layer_surface_close_overlay(l, &l->geom);
@@ -4486,8 +4408,6 @@ void unmaplayersurfacenotify(struct wl_listener *listener, void *data) {
 
 void unmapnotify(struct wl_listener *listener, void *data) {
   Client *c = wl_container_of(listener, c, unmap);
-  AnimationSample sample;
-  struct timespec now;
   client_clear_pending_configure(c);
   if (c == grabc) {
     cursor_mode = CurNormal;
@@ -4501,10 +4421,7 @@ void unmapnotify(struct wl_listener *listener, void *data) {
     }
   } else {
     if (!c->close_pending && c->scene) {
-      clock_gettime(CLOCK_MONOTONIC, &now);
-      sample_client_animation(c, &now, &sample);
-      c->geom = sample.geom;
-      c->opacity = sample.opacity;
+      sample_animation_state(&c->anim, NULL, &c->geom, &c->opacity, NULL, NULL);
       client_apply_scene_geometry(c, &c->geom);
       apply_client_opacity(c, c->opacity);
       create_close_overlay(c, &c->geom);
