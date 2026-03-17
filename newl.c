@@ -1874,8 +1874,8 @@ client_finish_managed_map(Client *c, Client *parent) {
   if (parent) {
     c->isfloating = 1;
     if (parent->mon) {
-      c->geom.x = (parent->mon->w.width - c->geom.width) / 2 + parent->mon->m.x;
-      c->geom.y = (parent->mon->w.height - c->geom.height) / 2 + parent->mon->m.y;
+      c->geom.x = parent->current_geom.x + (parent->current_geom.width - c->geom.width) / 2;
+      c->geom.y = parent->current_geom.y + (parent->current_geom.height - c->geom.height) / 2;
     }
     setmon(c, parent->mon, parent->tags);
   } else {
@@ -4087,7 +4087,6 @@ void setmfact(const Arg *arg) {
 
 void setmon(Client *c, Monitor *m, uint32_t newtags) {
   Monitor *oldmon = c->mon;
-
   if (oldmon == m)
     return;
   c->mon = m;
@@ -4096,14 +4095,14 @@ void setmon(Client *c, Monitor *m, uint32_t newtags) {
   if (oldmon)
     arrange(oldmon);
   if (m) {
-    client_request_geometry(c, &c->geom, 0);
     c->tags = newtags ? newtags : m->tagset[m->seltags];
+    if (c->isfloating || c->isfullscreen || !m->lt[m->sellt]->arrange)
+      client_request_geometry(c, &c->geom, 0);
     suppress_arrange++;
     setfullscreen(c, c->isfullscreen);
     setfloating(c, c->isfloating);
     suppress_arrange--;
     arrange(m);
-    printstatus();
   }
   focusclient(focustop(selmon), 1);
 }
