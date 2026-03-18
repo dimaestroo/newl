@@ -84,7 +84,6 @@ static void terminatechild(pid_t pid, int kill_group);
 #define LENGTH(X) (sizeof X / sizeof X[0])
 #define END(A) ((A) + LENGTH(A))
 #define TAGMASK ((1u << TAGCOUNT) - 1)
-#define CONFIGURE_TIMEOUT_MS 100
 #define LISTEN(E, L, H) wl_signal_add((E), ((L)->notify = (H), (L)))
 #define LISTEN_STATIC(E, H)                           \
   do {                                                \
@@ -184,7 +183,6 @@ typedef struct
   bool hide_on_anim_end;
   bool close_pending;
   unsigned int initial_position;
-  struct wl_event_source *pending_configure_timeout;
 } Client;
 typedef struct
 {
@@ -341,7 +339,6 @@ static void chvt(const Arg *arg);
 static void checkidleinhibitor(struct wlr_surface *exclude);
 static void cleanup(void);
 static void cleanupmon(struct wl_listener *listener, void *data);
-static void cleanuplisteners(void);
 static void closemon(Monitor *m);
 static void commitlayersurfacenotify(struct wl_listener *listener, void *data);
 static void commitnotify(struct wl_listener *listener, void *data);
@@ -497,15 +494,12 @@ static void client_apply_committed_geometry(Client *c, int width, int height);
 static void client_get_requested_surface_size(Client *c, const struct wlr_box *geo,
                                               const struct wlr_box *prev,
                                               uint32_t *width, uint32_t *height);
-static void client_clear_pending_configure(Client *c);
-static int client_handle_configure_timeout(void *data);
 static int client_get_xdg_committed_size(Client *c, struct wlr_box *size);
 static void client_handle_x11_commit(Client *c);
 static void client_request_geometry(Client *c, const struct wlr_box *geo, int interact);
 static void client_request_surface_size(Client *c, const struct wlr_box *geo,
                                         const struct wlr_box *prev);
 static void client_set_scheduled_size(Client *c, const struct wlr_box *geo);
-static void client_set_pending_configure_serial(Client *c, uint32_t serial);
 static void client_create_borders(Client *c);
 static int client_map_unmanaged(Client *c);
 static void client_apply_x11_configure_request(
@@ -1638,41 +1632,6 @@ static void client_configure_x11_surface(Client *c, const struct wlr_box *geo,
 }
 #endif
 
-static void client_clear_pending_configure(Client *c) {
-  if (!c->pending_configure_timeout) {
-    c->pending_configure_serial = 0;
-    return;
-  }
-
-  wl_event_source_remove(c->pending_configure_timeout);
-  c->pending_configure_timeout = NULL;
-  c->pending_configure_serial = 0;
-}
-
-static int client_handle_configure_timeout(void *data) {
-  Client *c = data;
-  if (!c->pending_configure_serial)
-    return 0;
-
-  client_clear_pending_configure(c);
-  if (!c->scene || !client_surface(c)->mapped)
-    return 0;
-
-  if (c->geom.x != c->current_geom.x || c->geom.y != c->current_geom.y) {
-    struct wlr_box moved = c->current_geom.width > 0 && c->current_geom.height > 0
-                               ? c->current_geom
-                               : c->geom;
-    moved.x = c->geom.x;
-    moved.y = c->geom.y;
-    client_apply_current_visual_geometry(c, &moved, &c->geom, 1);
-  }
-
-  client_set_scheduled_size(
-      c, client_should_use_visual_geometry(c, &c->current_geom, &c->geom) ? &c->geom
-                                                                          : &c->current_geom);
-  return 0;
-}
-
 static void client_handle_x11_commit(Client *c) {
   if (c->scene && client_surface(c)->mapped) {
     struct wlr_box committed = {
@@ -1724,18 +1683,6 @@ static void client_set_scheduled_size(Client *c, const struct wlr_box *geo) {
       MAX(geo->width, 1 + 2 * (int)c->bw) - 2 * c->bw;
   c->surface.xdg->toplevel->scheduled.height =
       MAX(geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw;
-}
-
-static void client_set_pending_configure_serial(Client *c, uint32_t serial) {
-  if (!serial)
-    return;
-
-  c->pending_configure_serial = serial;
-  if (!c->pending_configure_timeout) {
-    c->pending_configure_timeout =
-        wl_event_loop_add_timer(event_loop, client_handle_configure_timeout, c);
-  }
-  wl_event_source_timer_update(c->pending_configure_timeout, CONFIGURE_TIMEOUT_MS);
 }
 
 static void client_create_borders(Client *c) {
@@ -1802,13 +1749,11 @@ static void client_request_surface_size(Client *c, const struct wlr_box *geo,
     return;
   }
 #endif
-
-  client_set_pending_configure_serial(c,
-                                      (c->pending_configure_serial && c->surface.xdg->toplevel->scheduled.width == (int32_t)width && c->surface.xdg->toplevel->scheduled.height == (int32_t)height)
-                                          ? 0
-                                          : wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
-                                                                      (int32_t)width,
-                                                                      (int32_t)height));
+  c->pending_configure_serial = (c->pending_configure_serial && c->surface.xdg->toplevel->scheduled.width == (int32_t)width && c->surface.xdg->toplevel->scheduled.height == (int32_t)height)
+                                    ? 0
+                                    : wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
+                                                                (int32_t)width,
+                                                                (int32_t)height);
 }
 
 static void client_request_geometry(Client *c, const struct wlr_box *geo, int interact) {
@@ -1850,7 +1795,7 @@ static void client_request_geometry(Client *c, const struct wlr_box *geo, int in
 
   if (size_changed) {
     client_request_surface_size(c, geo, &prev);
-  } else if (!c->pending_configure_serial) {
+  } else {
     struct wlr_box current = has_current ? c->current_geom : *geo;
     current.x = geo->x;
     current.y = geo->y;
@@ -2241,7 +2186,7 @@ static int step_client_animation_frame(Client *c, const struct timespec *now) {
     }
 
     c->geom = c->anim.target;
-    if (c->pending_configure_serial || c->anim.projected.width != c->anim.target.width || c->anim.projected.height != c->anim.target.height) {
+    if (c->anim.projected.width != c->anim.target.width || c->anim.projected.height != c->anim.target.height) {
       client_request_surface_size(c, &c->anim.target, NULL);
     } else {
       client_request_geometry(c, &c->anim.target, 0);
@@ -2574,8 +2519,37 @@ void checkidleinhibitor(struct wlr_surface *exclude) {
 void cleanup(void) {
   CloseOverlay *overlay, *tmp;
   size_t i;
-  cleanuplisteners();
+  wl_list_remove(&cursor_axis.link);
+  wl_list_remove(&cursor_button.link);
+  wl_list_remove(&cursor_frame.link);
+  wl_list_remove(&cursor_motion.link);
+  wl_list_remove(&cursor_motion_absolute.link);
+  wl_list_remove(&gpu_reset.link);
+  wl_list_remove(&new_idle_inhibitor.link);
+  wl_list_remove(&layout_change.link);
+  wl_list_remove(&new_input_device.link);
+  wl_list_remove(&new_virtual_keyboard.link);
+  wl_list_remove(&new_virtual_pointer.link);
+  wl_list_remove(&new_pointer_constraint.link);
+  wl_list_remove(&new_output.link);
+  wl_list_remove(&new_xdg_toplevel.link);
+  wl_list_remove(&new_xdg_decoration.link);
+  wl_list_remove(&new_xdg_popup.link);
+  wl_list_remove(&new_layer_surface.link);
+  wl_list_remove(&output_mgr_apply.link);
+  wl_list_remove(&output_mgr_test.link);
+  wl_list_remove(&output_power_mgr_set_mode.link);
+  wl_list_remove(&request_activate.link);
+  wl_list_remove(&request_cursor.link);
+  wl_list_remove(&request_set_psel.link);
+  wl_list_remove(&request_set_sel.link);
+  wl_list_remove(&request_set_cursor_shape.link);
+  wl_list_remove(&request_start_drag.link);
+  wl_list_remove(&start_drag.link);
+  wl_list_remove(&new_session_lock.link);
 #ifdef XWAYLAND
+  wl_list_remove(&new_xwayland_surface.link);
+  wl_list_remove(&xwayland_ready.link);
   wlr_xwayland_destroy(xwayland);
   xwayland = NULL;
 #endif
@@ -2625,41 +2599,6 @@ void cleanupmon(struct wl_listener *listener, void *data) {
 
   closemon(m);
   free(m);
-}
-
-void cleanuplisteners(void) {
-  wl_list_remove(&cursor_axis.link);
-  wl_list_remove(&cursor_button.link);
-  wl_list_remove(&cursor_frame.link);
-  wl_list_remove(&cursor_motion.link);
-  wl_list_remove(&cursor_motion_absolute.link);
-  wl_list_remove(&gpu_reset.link);
-  wl_list_remove(&new_idle_inhibitor.link);
-  wl_list_remove(&layout_change.link);
-  wl_list_remove(&new_input_device.link);
-  wl_list_remove(&new_virtual_keyboard.link);
-  wl_list_remove(&new_virtual_pointer.link);
-  wl_list_remove(&new_pointer_constraint.link);
-  wl_list_remove(&new_output.link);
-  wl_list_remove(&new_xdg_toplevel.link);
-  wl_list_remove(&new_xdg_decoration.link);
-  wl_list_remove(&new_xdg_popup.link);
-  wl_list_remove(&new_layer_surface.link);
-  wl_list_remove(&output_mgr_apply.link);
-  wl_list_remove(&output_mgr_test.link);
-  wl_list_remove(&output_power_mgr_set_mode.link);
-  wl_list_remove(&request_activate.link);
-  wl_list_remove(&request_cursor.link);
-  wl_list_remove(&request_set_psel.link);
-  wl_list_remove(&request_set_sel.link);
-  wl_list_remove(&request_set_cursor_shape.link);
-  wl_list_remove(&request_start_drag.link);
-  wl_list_remove(&start_drag.link);
-  wl_list_remove(&new_session_lock.link);
-#ifdef XWAYLAND
-  wl_list_remove(&new_xwayland_surface.link);
-  wl_list_remove(&xwayland_ready.link);
-#endif
 }
 
 void closemon(Monitor *m) {
@@ -2758,9 +2697,9 @@ void commitnotify(struct wl_listener *listener, void *data) {
     }
 
     if (c->pending_configure_serial && c->pending_configure_serial == c->surface.xdg->current.configure_serial)
-      client_clear_pending_configure(c);
+      c->pending_configure_serial = 0;
 
-    if (!c->pending_configure_serial && !c->anim.active) {
+    if (!c->anim.active) {
       if (!client_should_use_visual_geometry(c, &c->current_geom, &c->geom))
         c->geom = c->current_geom;
       client_set_scheduled_size(
@@ -3126,7 +3065,7 @@ void destroynotify(struct wl_listener *listener, void *data) {
   Client *c = wl_container_of(listener, c, destroy);
   if (c == focus_anchor)
     focus_anchor = NULL;
-  client_clear_pending_configure(c);
+  c->pending_configure_serial = 0;
   wl_list_remove(&c->destroy.link);
   wl_list_remove(&c->set_title.link);
   wl_list_remove(&c->fullscreen.link);
@@ -3543,7 +3482,6 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx, dou
   Client *c = NULL;
   struct wlr_surface *surface = NULL;
   struct wlr_pointer_constraint_v1 *constraint;
-
   xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
   if (time) {
     wlr_relative_pointer_manager_v1_send_relative_motion(
@@ -4279,7 +4217,7 @@ void unmaplayersurfacenotify(struct wl_listener *listener, void *data) {
 
 void unmapnotify(struct wl_listener *listener, void *data) {
   Client *c = wl_container_of(listener, c, unmap);
-  client_clear_pending_configure(c);
+  c->pending_configure_serial = 0;
   if (c == grabc) {
     cursor_mode = CurNormal;
     grabc = NULL;
@@ -4494,6 +4432,7 @@ void activatex11(struct wl_listener *listener, void *data) {
 
 void associatex11(struct wl_listener *listener, void *data) {
   Client *c = wl_container_of(listener, c, associate);
+  LISTEN(&client_surface(c)->events.commit, &c->commit, commitnotify);
   LISTEN(&client_surface(c)->events.map, &c->map, mapnotify);
   LISTEN(&client_surface(c)->events.unmap, &c->unmap, unmapnotify);
 }
@@ -4533,6 +4472,7 @@ void createnotifyx11(struct wl_listener *listener, void *data) {
 
 void dissociatex11(struct wl_listener *listener, void *data) {
   Client *c = wl_container_of(listener, c, dissociate);
+  wl_list_remove(&c->commit.link);
   wl_list_remove(&c->map.link);
   wl_list_remove(&c->unmap.link);
 }
