@@ -76,7 +76,6 @@ static void die(const char *fmt, ...);
 static void *ecalloc(size_t nmemb, size_t size);
 static int fd_set_nonblock(int fd);
 static void terminatechild(pid_t pid, int kill_group);
-
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 #define CLEANMASK(mask) (mask & ~WLR_MODIFIER_CAPS)
 #define VISIBLEONTAGS(C, M, T) ((M) && (C)->mon == (M) && ((C)->tags & (T)))
@@ -122,16 +121,14 @@ typedef union {
   const void *v;
 } Arg;
 
-typedef struct
-{
+typedef struct {
   unsigned int mod;
   unsigned int button;
   void (*func)(const Arg *);
   const Arg arg;
 } Button;
 typedef struct Monitor Monitor;
-typedef struct
-{
+typedef struct {
   struct wlr_box start;
   struct wlr_box target;
   struct wlr_box projected;
@@ -140,8 +137,7 @@ typedef struct
   float target_opacity;
   bool active;
 } Animation;
-typedef struct
-{
+typedef struct {
   unsigned int type;
   Monitor *mon;
   struct wlr_scene_tree *scene;
@@ -183,20 +179,17 @@ typedef struct
   bool hide_on_anim_end;
   unsigned int initial_position;
 } Client;
-typedef struct
-{
+typedef struct {
   struct wl_list link;
   struct wlr_scene_buffer *scene_buffer;
   float opacity;
 } CloseOverlayBuffer;
-typedef struct
-{
+typedef struct {
   struct wl_list link;
   struct wlr_scene_rect *scene_rect;
   float color[4];
 } CloseOverlayRect;
-typedef struct
-{
+typedef struct {
   struct wl_list link;
   Monitor *mon;
   struct wlr_scene_tree *scene;
@@ -205,26 +198,22 @@ typedef struct
   struct wlr_box geom;
   struct timespec start_time;
 } CloseOverlay;
-typedef struct
-{
+typedef struct {
   CloseOverlay *overlay;
   Client *client;
 } CloseOverlaySnapshotData;
-typedef struct
-{
+typedef struct {
   struct wl_list link;
   struct wl_resource *resource;
   Monitor *mon;
 } DwlIpcOutput;
-typedef struct
-{
+typedef struct {
   uint32_t mod;
   xkb_keysym_t keysym;
   void (*func)(const Arg *);
   const Arg arg;
 } Key;
-typedef struct
-{
+typedef struct {
   struct wlr_keyboard_group *wlr_group;
   int nsyms;
   const xkb_keysym_t *keysyms;
@@ -234,8 +223,7 @@ typedef struct
   struct wl_listener key;
   struct wl_listener destroy;
 } KeyboardGroup;
-typedef struct
-{
+typedef struct {
   unsigned int type;
   Monitor *mon;
   struct wlr_scene_tree *scene;
@@ -253,8 +241,7 @@ typedef struct
   struct wl_listener unmap;
   struct wl_listener surface_commit;
 } LayerSurface;
-typedef struct
-{
+typedef struct {
   const char *symbol;
   void (*arrange)(Monitor *);
 } Layout;
@@ -286,8 +273,7 @@ struct Monitor {
   int switch_dir;
   int gaps;
 };
-typedef struct
-{
+typedef struct {
   const char *name;
   float mfact;
   float scale;
@@ -295,23 +281,19 @@ typedef struct
   enum wl_output_transform rr;
   int x, y;
 } MonitorRule;
-typedef struct
-{
+typedef struct {
   struct wlr_pointer_constraint_v1 *constraint;
   struct wl_listener destroy;
 } PointerConstraint;
-typedef struct
-{
+typedef struct {
   const char *id;
   const char *title;
   uint32_t tags;
   int isfloating;
   int monitor;
 } Rule;
-typedef struct
-{
+typedef struct {
   struct wlr_scene_tree *scene;
-
   struct wlr_session_lock_v1 *lock;
   struct wl_listener new_surface;
   struct wl_listener unlock;
@@ -1422,7 +1404,7 @@ static void get_client_settled_geometry(Client *c, struct wlr_box *geom) {
 
 static int get_monitor_switch_offset(Monitor *m, uint32_t tags) {
   Client *c;
-  struct wlr_box current_geom, settled_geom;
+  struct wlr_box settled_geom;
   int offset_sum = 0, samples = 0;
 
   wl_list_for_each(c, &clients, link) {
@@ -1431,9 +1413,8 @@ static int get_monitor_switch_offset(Monitor *m, uint32_t tags) {
     if (!c->is_tag_switch_anim || !c->anim.active || c->hide_on_anim_end)
       continue;
 
-    sample_animation_state(&c->anim, &m->switch_start_time, &current_geom, NULL, NULL, NULL);
     get_client_settled_geometry(c, &settled_geom);
-    offset_sum += current_geom.x - settled_geom.x;
+    offset_sum += c->geom.x - settled_geom.x;
     samples++;
   }
 
@@ -1876,18 +1857,14 @@ static void start_layout_animation(Client *c, Monitor *m, const struct wlr_box *
 }
 
 static void start_tag_switch_exit_animation(Client *c, Monitor *m) {
-  struct wlr_box restore, start, target;
-  float start_opacity;
-  sample_animation_state(&c->anim, &m->switch_start_time, &start, &start_opacity, NULL, NULL);
-  get_client_settled_geometry(c, &restore);
-  c->opacity = start_opacity;
-  c->restore_geom = restore;
+  struct wlr_box target;
+  get_client_settled_geometry(c, &target);
+  c->restore_geom = target;
   c->hide_on_anim_end = 1;
   c->is_tag_switch_anim = 1;
 
-  target = restore;
   target.x -= m->switch_dir * m->m.width;
-  start_animation_at(c, &target, &start, start_opacity, &m->switch_start_time);
+  start_animation_at(c, &target, &c->geom, c->opacity, &m->switch_start_time);
 }
 
 static void prepare_layer_surface_initial_position(LayerSurface *l, const struct wlr_box *target,
@@ -2525,7 +2502,6 @@ void commitlayersurfacenotify(struct wl_listener *listener, void *data) {
   LayerSurface *l = wl_container_of(listener, l, surface_commit);
   struct wlr_layer_surface_v1 *layer_surface = l->layer_surface;
   struct wlr_scene_tree *scene_layer = layers[layermap[layer_surface->current.layer]];
-  float opacity;
   struct wlr_layer_surface_v1_state old_state;
 
   if (l->layer_surface->initial_commit) {
@@ -2549,8 +2525,6 @@ void commitlayersurfacenotify(struct wl_listener *listener, void *data) {
   }
 
   arrangelayers(l->mon);
-  sample_animation_state(&l->anim, NULL, NULL, &opacity, NULL, NULL);
-  apply_layer_surface_opacity(l, opacity);
 }
 
 void commitnotify(struct wl_listener *listener, void *data) {
@@ -2911,7 +2885,6 @@ void destroylock(SessionLock *lock, int unlock) {
     goto destroy;
 
   wlr_scene_node_set_enabled(&locked_bg->node, 0);
-
   focusclient(focustop(selmon), 0);
   motionnotify(0, NULL, 0, 0, 0, 0);
 
@@ -4059,17 +4032,10 @@ void unlocksession(struct wl_listener *listener, void *data) {
 void unmaplayersurfacenotify(struct wl_listener *listener, void *data) {
   LayerSurface *l = wl_container_of(listener, l, unmap);
 
-  if (l->mapped && l->scene) {
-    sample_animation_state(&l->anim, NULL, &l->geom, &l->opacity, NULL, NULL);
-    set_layer_surface_geom(l, &l->geom);
-    apply_layer_surface_opacity(l, l->opacity);
+  if (l->mapped && l->scene)
     create_layer_surface_close_overlay(l, &l->geom);
-  }
-
   l->anim.active = 0;
   l->mapped = 0;
-  wlr_scene_node_set_enabled(&l->scene->node, 0);
-  wlr_scene_node_set_enabled(&l->popups->node, 0);
   if (l == exclusive_focus)
     exclusive_focus = NULL;
   if (l->layer_surface->output && (l->mon = l->layer_surface->output->data)) {
@@ -4096,12 +4062,8 @@ void unmapnotify(struct wl_listener *listener, void *data) {
       focusclient(focustop(selmon), 1);
     }
   } else {
-    if (c->scene) {
-      sample_animation_state(&c->anim, NULL, &c->geom, &c->opacity, NULL, NULL);
-      client_apply_scene_geometry(c, &c->geom);
-      apply_client_opacity(c, c->opacity);
+    if (c->scene)
       create_close_overlay(c, &c->geom);
-    }
     c->anim.active = 0;
     if (c == focus_anchor)
       focus_anchor = focus_fallback_from(c, c->mon);
