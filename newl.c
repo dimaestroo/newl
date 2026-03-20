@@ -484,6 +484,8 @@ static void prepare_layer_surface_initial_position(LayerSurface *l,
                                                    const struct wlr_box *target,
                                                    struct wlr_box *start);
 static void start_layer_surface_animation(LayerSurface *l, const struct wlr_box *target);
+static bool close_overlay_buffer_accepts_input(struct wlr_scene_buffer *buffer,
+                                               double *sx, double *sy);
 static void snapshot_close_overlay_buffer(struct wlr_scene_buffer *buffer, int sx, int sy,
                                           void *data);
 static void snapshot_close_overlay_tree(CloseOverlay *overlay,
@@ -491,7 +493,8 @@ static void snapshot_close_overlay_tree(CloseOverlay *overlay,
 static void transfer_client_borders_to_close_overlay(CloseOverlay *overlay,
                                                      Client *client);
 static CloseOverlay *create_close_overlay_base(Monitor *mon,
-                                               const struct wlr_box *geom);
+                                               const struct wlr_box *geom,
+                                               struct wlr_scene_tree *source_tree);
 static void activate_close_overlay(CloseOverlay *overlay);
 static void create_close_overlay(Client *c, const struct wlr_box *geom);
 static void create_layer_surface_close_overlay(LayerSurface *l, const struct wlr_box *geom);
@@ -518,7 +521,6 @@ static struct wl_display *dpy;
 static struct wl_event_loop *event_loop;
 static struct wlr_backend *backend;
 static struct wlr_scene *scene;
-static struct wlr_scene_tree *close_overlay_tree;
 static struct wlr_scene_tree *layers[NUM_LAYERS];
 static struct wlr_scene_tree *drag_icon;
 
@@ -1348,6 +1350,11 @@ static void sample_animation_state(const Animation *anim, const struct timespec 
                                    struct wlr_box *geom, float *opacity,
                                    float *progress, float *eased_progress) {
   float local_progress, local_eased_progress;
+  struct timespec local_now;
+  if (!now) {
+    clock_gettime(CLOCK_MONOTONIC, &local_now);
+    now = &local_now;
+  }
   sample_animation_timing(&anim->start_time, now, &local_progress,
                           &local_eased_progress);
   sample_animation(anim, local_eased_progress, geom, opacity);
@@ -1441,7 +1448,7 @@ static void get_projected_animation_box(const Animation *anim, struct wlr_box *p
 static void client_apply_visual_geometry(Client *c, const struct wlr_box *geo) {
   struct wlr_box clip;
 
-  if (!c->scene || !c->scene_surface)
+  if (!c->mon || !client_surface(c)->mapped)
     return;
   wlr_scene_node_set_position(&c->scene->node, geo->x, geo->y);
   wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
@@ -1617,12 +1624,14 @@ static void start_client_animation(Client *c, const struct wlr_box *target, cons
       wlr_output_schedule_frame(c->mon->wlr_output);
     return;
   }
-
+  c->anim.start_opacity = c->opacity;
   if (start)
     c->anim.start = *start;
+  else if (c->anim.active)
+    sample_animation_state(&c->anim, NULL, &c->anim.start,
+                           &c->anim.start_opacity, NULL, NULL);
   else
     c->anim.start = c->geom;
-  c->anim.start_opacity = c->opacity;
   c->anim.target = *target;
   c->anim.target_opacity = target_opacity;
   c->anim.projected = *target;
@@ -1746,6 +1755,10 @@ static void start_layer_surface_animation(LayerSurface *l, const struct wlr_box 
     wlr_output_schedule_frame(l->mon->wlr_output);
 }
 
+static bool close_overlay_buffer_accepts_input(struct wlr_scene_buffer *buffer, double *sx, double *sy) {
+  return 0;
+}
+
 static void snapshot_close_overlay_buffer(struct wlr_scene_buffer *buffer, int sx, int sy,
                                           void *data) {
   CloseOverlaySnapshotData *snapshot_data = data;
@@ -1763,6 +1776,7 @@ static void snapshot_close_overlay_buffer(struct wlr_scene_buffer *buffer, int s
 
   snapshot = ecalloc(1, sizeof(*snapshot));
   snapshot->scene_buffer = wlr_scene_buffer_create(overlay->scene, buffer->buffer);
+  snapshot->scene_buffer->point_accepts_input = close_overlay_buffer_accepts_input;
   snapshot->opacity = buffer->opacity;
   wlr_scene_node_set_position(&snapshot->scene_buffer->node,
                               sx - overlay->geom.x, sy - overlay->geom.y);
@@ -1820,15 +1834,16 @@ static void activate_close_overlay(CloseOverlay *overlay) {
     wlr_output_schedule_frame(overlay->mon->wlr_output);
 }
 
-static CloseOverlay *create_close_overlay_base(Monitor *mon, const struct wlr_box *geom) {
+static CloseOverlay *create_close_overlay_base(Monitor *mon, const struct wlr_box *geom,
+                                               struct wlr_scene_tree *source_tree) {
   CloseOverlay *overlay = ecalloc(1, sizeof(*overlay));
-
   overlay->mon = mon;
   overlay->geom = *geom;
-  overlay->scene = wlr_scene_tree_create(close_overlay_tree);
+  overlay->scene = wlr_scene_tree_create(source_tree->node.parent);
   wl_list_init(&overlay->buffers);
   wl_list_init(&overlay->rects);
   wlr_scene_node_set_position(&overlay->scene->node, geom->x, geom->y);
+  wlr_scene_node_place_below(&overlay->scene->node, &source_tree->node);
   return overlay;
 }
 
@@ -1850,16 +1865,14 @@ static void destroy_close_overlay(CloseOverlay *overlay) {
 }
 
 static void create_close_overlay(Client *c, const struct wlr_box *geom) {
-  CloseOverlay *overlay = create_close_overlay_base(c->mon, geom);
-
+  CloseOverlay *overlay = create_close_overlay_base(c->mon, geom, c->scene);
   snapshot_close_overlay_tree(overlay, c->scene, c);
   transfer_client_borders_to_close_overlay(overlay, c);
   activate_close_overlay(overlay);
 }
 
 static void create_layer_surface_close_overlay(LayerSurface *l, const struct wlr_box *geom) {
-  CloseOverlay *overlay = create_close_overlay_base(l->mon, geom);
-
+  CloseOverlay *overlay = create_close_overlay_base(l->mon, geom, l->scene);
   snapshot_close_overlay_tree(overlay, l->scene, NULL);
   snapshot_close_overlay_tree(overlay, l->popups, NULL);
   activate_close_overlay(overlay);
@@ -3067,10 +3080,8 @@ void mapnotify(struct wl_listener *listener, void *data) {
   c->scene->node.data = c->scene_surface->node.data = c;
   client_get_geometry(c, &c->geom);
 
-  if (c->type == XDGShell) {
-    c->geom.width = MAX(c->geom.width, 1) + 2 * c->bw;
-    c->geom.height = MAX(c->geom.height, 1) + 2 * c->bw;
-  }
+  c->geom.width = MAX(c->geom.width, 1) + 2 * c->bw;
+  c->geom.height = MAX(c->geom.height, 1) + 2 * c->bw;
 
   if (client_wants_fullscreen(c))
     setfullscreen(c, 1);
@@ -3586,8 +3597,6 @@ void setup(void) {
   for (i = 0; i < NUM_LAYERS; i++)
     layers[i] = wlr_scene_tree_create(&scene->tree);
   drag_icon = wlr_scene_tree_create(&scene->tree);
-  close_overlay_tree = wlr_scene_tree_create(&scene->tree);
-  wlr_scene_node_place_below(&close_overlay_tree->node, &layers[LyrBlock]->node);
   wlr_scene_node_place_below(&drag_icon->node, &layers[LyrBlock]->node);
   wl_list_init(&close_overlays);
 

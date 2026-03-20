@@ -146,7 +146,7 @@ static const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TA
   }
 
 /* commands */
-static const char *termcmd[] = {"kitty", NULL};
+static const char *termcmd[] = {"foot", NULL};
 static const char *menucmd[] = {"fuzzel", NULL};
 
 static const Key keys[] = {
