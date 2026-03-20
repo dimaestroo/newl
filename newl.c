@@ -170,7 +170,6 @@ typedef struct {
 #endif
   unsigned int bw;
   uint32_t tags;
-  uint32_t pending_configure_serial;
   int isfloating, isurgent, isfullscreen;
   Animation anim;
   float opacity;
@@ -469,7 +468,6 @@ static void client_handle_x11_commit(Client *c);
 static void client_request_geometry(Client *c, const struct wlr_box *geo);
 static void client_request_surface_size(Client *c, const struct wlr_box *geo,
                                         const struct wlr_box *prev);
-static void client_set_scheduled_size(Client *c, const struct wlr_box *geo);
 static void client_create_borders(Client *c);
 static int client_map_unmanaged(Client *c);
 static void client_apply_x11_configure_request(
@@ -1569,16 +1567,6 @@ static int client_get_xdg_committed_size(Client *c, struct wlr_box *size) {
   return 1;
 }
 
-static void client_set_scheduled_size(Client *c, const struct wlr_box *geo) {
-  if (client_is_x11(c))
-    return;
-
-  c->surface.xdg->toplevel->scheduled.width =
-      MAX(geo->width, 1 + 2 * (int)c->bw) - 2 * c->bw;
-  c->surface.xdg->toplevel->scheduled.height =
-      MAX(geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw;
-}
-
 static void client_create_borders(Client *c) {
   float initial_color[4];
   int i;
@@ -1642,11 +1630,9 @@ static void client_request_surface_size(Client *c, const struct wlr_box *geo,
     return;
   }
 #endif
-  c->pending_configure_serial = (c->pending_configure_serial && c->surface.xdg->toplevel->scheduled.width == (int32_t)width && c->surface.xdg->toplevel->scheduled.height == (int32_t)height)
-                                    ? 0
-                                    : wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
-                                                                (int32_t)width,
-                                                                (int32_t)height);
+  wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel,
+                            (int32_t)width,
+                            (int32_t)height);
 }
 
 static void client_request_geometry(Client *c, const struct wlr_box *geo) {
@@ -1885,7 +1871,8 @@ static void activate_close_overlay(CloseOverlay *overlay) {
   clock_gettime(CLOCK_MONOTONIC, &overlay->start_time);
   wl_list_insert(close_overlays.prev, &overlay->link);
   if (overlay->mon && overlay->mon->wlr_output)
-    wlr_output_schedule_frame(overlay->mon->wlr_output);}
+    wlr_output_schedule_frame(overlay->mon->wlr_output);
+}
 
 static CloseOverlay *create_close_overlay_base(Monitor *mon, const struct wlr_box *geom) {
   CloseOverlay *overlay = ecalloc(1, sizeof(*overlay));
@@ -2460,9 +2447,6 @@ void commitnotify(struct wl_listener *listener, void *data) {
                                           .y = c->geom.y,
                                           .width = MIN(size.width + 2 * (int)c->bw, c->geom.width),
                                           .height = MIN(size.height + 2 * (int)c->bw, c->geom.height)});
-    if (c->pending_configure_serial && c->pending_configure_serial == c->surface.xdg->current.configure_serial)
-      c->pending_configure_serial = 0;
-    client_set_scheduled_size(c, &c->geom);
   }
 }
 
@@ -2817,7 +2801,6 @@ void destroynotify(struct wl_listener *listener, void *data) {
   Client *c = wl_container_of(listener, c, destroy);
   if (c == focus_anchor)
     focus_anchor = NULL;
-  c->pending_configure_serial = 0;
   wl_list_remove(&c->destroy.link);
   wl_list_remove(&c->set_title.link);
   wl_list_remove(&c->fullscreen.link);
@@ -2962,12 +2945,8 @@ void focusstack(const Arg *arg) {
 
 Client *focustop(Monitor *m) {
   Client *c;
-  if (focus_anchor) {
-    if (VISIBLEON(focus_anchor, m))
-      return focus_anchor;
-    if ((c = focus_fallback_from(focus_anchor, m)))
-      return c;
-  }
+  if (focus_anchor && VISIBLEON(focus_anchor, m))
+    return focus_anchor;
   wl_list_for_each_reverse(c, &clients, link) {
     if (VISIBLEON(c, m))
       return c;
@@ -3943,7 +3922,6 @@ void unmaplayersurfacenotify(struct wl_listener *listener, void *data) {
 
 void unmapnotify(struct wl_listener *listener, void *data) {
   Client *c = wl_container_of(listener, c, unmap);
-  c->pending_configure_serial = 0;
   if (c == grabc) {
     cursor_mode = CurNormal;
     grabc = NULL;
@@ -3960,7 +3938,6 @@ void unmapnotify(struct wl_listener *listener, void *data) {
     c->anim.active = 0;
     if (c == focus_anchor)
       focus_anchor = focus_fallback_from(c, c->mon);
-
     wl_list_remove(&c->link);
     setmon(c, NULL, 0);
   }
