@@ -77,6 +77,7 @@ static void *ecalloc(size_t nmemb, size_t size);
 static int fd_set_nonblock(int fd);
 static void terminatechild(pid_t pid, int kill_group);
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
+#define MIN(A, B) ((A) < (B) ? (A) : (B))
 #define CLEANMASK(mask) (mask & ~WLR_MODIFIER_CAPS)
 #define VISIBLEONTAGS(C, M, T) ((M) && (C)->mon == (M) && ((C)->tags & (T)))
 #define VISIBLEON(C, M) VISIBLEONTAGS((C), (M), (M)->tagset[(M)->seltags])
@@ -145,7 +146,6 @@ typedef struct {
   struct wlr_scene_tree *scene_surface;
   struct wl_list link;
   struct wlr_box geom;
-  struct wlr_box current_geom;
   struct wlr_box prev;
   union {
     struct wlr_xdg_surface *xdg;
@@ -459,24 +459,14 @@ static void apply_layer_surface_opacity(LayerSurface *l, float opacity);
 static const float *client_border_base_color(Client *c);
 static void get_projected_animation_box(const Animation *anim, struct wlr_box *projected);
 static void client_apply_visual_geometry(Client *c, const struct wlr_box *geo);
-static void client_apply_scene_geometry(Client *c, const struct wlr_box *geo);
-static int client_is_interactive_resize(Client *c);
-static int client_should_use_visual_geometry(Client *c,
-                                             const struct wlr_box *current,
-                                             const struct wlr_box *visual);
-static void client_apply_current_visual_geometry(Client *c,
-                                                 const struct wlr_box *current,
-                                                 const struct wlr_box *visual,
-                                                 int immediate_scene);
 static void client_init_common(Client *c, unsigned int type, unsigned int bw,
                                unsigned int initial_position);
-static void client_apply_committed_geometry(Client *c, int width, int height);
 static void client_get_requested_surface_size(Client *c, const struct wlr_box *geo,
                                               const struct wlr_box *prev,
                                               uint32_t *width, uint32_t *height);
 static int client_get_xdg_committed_size(Client *c, struct wlr_box *size);
 static void client_handle_x11_commit(Client *c);
-static void client_request_geometry(Client *c, const struct wlr_box *geo, int interact);
+static void client_request_geometry(Client *c, const struct wlr_box *geo);
 static void client_request_surface_size(Client *c, const struct wlr_box *geo,
                                         const struct wlr_box *prev);
 static void client_set_scheduled_size(Client *c, const struct wlr_box *geo);
@@ -1512,61 +1502,11 @@ static void client_apply_visual_geometry(Client *c, const struct wlr_box *geo) {
   wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 }
 
-static void client_apply_scene_geometry(Client *c, const struct wlr_box *geo) {
-  c->current_geom = *geo;
-  client_apply_visual_geometry(c, geo);
-}
-
-static int client_is_interactive_resize(Client *c) {
-  return cursor_mode == CurResize && grabc == c;
-}
-
-static int client_should_use_visual_geometry(Client *c, const struct wlr_box *current,
-                                             const struct wlr_box *visual) {
-  if (c->anim.active)
-    return 1;
-
-  if (client_is_interactive_resize(c))
-    return 0;
-
-  return current->width > visual->width || current->height > visual->height;
-}
-
-static void client_apply_current_visual_geometry(Client *c, const struct wlr_box *current,
-                                                 const struct wlr_box *visual, int immediate_scene) {
-  c->current_geom = *current;
-  client_apply_visual_geometry(c, (!immediate_scene || client_should_use_visual_geometry(c, current, visual))
-                                      ? visual
-                                      : current);
-}
-
 static void client_init_common(Client *c, unsigned int type, unsigned int bw,
                                unsigned int initial_position) {
   c->type = type;
   c->bw = bw;
   c->initial_position = initial_position;
-}
-
-static void client_apply_committed_geometry(Client *c, int width, int height) {
-  struct wlr_box committed;
-
-  committed = c->current_geom.width > 0 && c->current_geom.height > 0
-                  ? c->current_geom
-                  : c->geom;
-
-  if (committed.x != c->geom.x && committed.x + committed.width == c->geom.x + c->geom.width)
-    committed.x = c->geom.x + c->geom.width - width;
-  else
-    committed.x = c->geom.x;
-
-  if (committed.y != c->geom.y && committed.y + committed.height == c->geom.y + c->geom.height)
-    committed.y = c->geom.y + c->geom.height - height;
-  else
-    committed.y = c->geom.y;
-
-  committed.width = width;
-  committed.height = height;
-  client_apply_current_visual_geometry(c, &committed, &c->geom, 1);
 }
 
 static void client_get_requested_surface_size(Client *c, const struct wlr_box *geo,
@@ -1598,17 +1538,12 @@ static void client_configure_x11_surface(Client *c, const struct wlr_box *geo,
 
 static void client_handle_x11_commit(Client *c) {
   if (c->scene && client_surface(c)->mapped) {
-    struct wlr_box committed = {
-        .x = c->surface.xwayland->x - (int)c->bw,
-        .y = c->surface.xwayland->y - (int)c->bw,
-        .width = MAX(c->surface.xwayland->width, 1) + 2 * c->bw,
-        .height = MAX(c->surface.xwayland->height, 1) + 2 * c->bw,
-    };
-
-    if (client_is_unmanaged(c))
-      client_apply_scene_geometry(c, &committed);
-    else
-      client_apply_committed_geometry(c, committed.width, committed.height);
+    client_apply_visual_geometry(c, &(struct wlr_box){
+                                        .x = client_is_unmanaged(c) ? c->surface.xwayland->x - (int)c->bw : c->geom.x,
+                                        .y = client_is_unmanaged(c) ? c->surface.xwayland->y - (int)c->bw : c->geom.y,
+                                        .width = MAX(c->surface.xwayland->width, 1) + 2 * c->bw,
+                                        .height = MAX(c->surface.xwayland->height, 1) + 2 * c->bw,
+                                    });
   }
 }
 
@@ -1662,7 +1597,7 @@ static int client_map_unmanaged(Client *c) {
     return 0;
 
   wlr_scene_node_reparent(&c->scene->node, layers[LyrFloat]);
-  client_apply_scene_geometry(c, &c->current_geom);
+  client_apply_visual_geometry(c, &c->geom);
   if (client_wants_focus(c)) {
     focusclient(c, 1);
     exclusive_focus = c;
@@ -1681,14 +1616,14 @@ static void client_apply_x11_configure_request(
 
   if (client_is_unmanaged(c)) {
     c->geom = *geo;
-    client_apply_scene_geometry(c, geo);
+    client_apply_visual_geometry(c, geo);
     wlr_xwayland_surface_configure(c->surface.xwayland,
                                    event->x, event->y, event->width, event->height);
     return;
   }
 
   if ((c->isfloating && c != grabc) || !c->mon->lt[c->mon->sellt]->arrange)
-    client_request_geometry(c, geo, 0);
+    client_request_geometry(c, geo);
   else
     arrange(c->mon);
 }
@@ -1696,7 +1631,6 @@ static void client_apply_x11_configure_request(
 static void client_request_surface_size(Client *c, const struct wlr_box *geo,
                                         const struct wlr_box *prev) {
   uint32_t width, height;
-
   if (!c->mon || !c->scene || !client_surface(c)->mapped || client_is_unmanaged(c))
     return;
 
@@ -1715,51 +1649,18 @@ static void client_request_surface_size(Client *c, const struct wlr_box *geo,
                                                                 (int32_t)height);
 }
 
-static void client_request_geometry(Client *c, const struct wlr_box *geo, int interact) {
-  struct wlr_box prev = c->geom;
-  int size_changed;
-  int has_current;
-
-  if (interact)
+static void client_request_geometry(Client *c, const struct wlr_box *geo) {
+  if (grabc == c)
     c->anim.active = 0;
-
-  c->geom = *geo;
-  if (!c->mon || !c->scene || !client_surface(c)->mapped)
-    return;
-
   if (client_is_unmanaged(c)) {
-    client_apply_scene_geometry(c, geo);
+    client_apply_visual_geometry(c, geo);
     return;
   }
-
-  size_changed = geo->width != prev.width || geo->height != prev.height;
-  has_current = c->current_geom.width > 0 && c->current_geom.height > 0;
-
-#ifdef XWAYLAND
-  if (client_is_x11(c)) {
-    uint32_t width, height;
-
-    client_get_requested_surface_size(c, geo, size_changed ? &prev : NULL,
-                                      &width, &height);
-    client_configure_x11_surface(c, geo, width, height);
-    if (!size_changed) {
-      struct wlr_box current = has_current ? c->current_geom : *geo;
-      current.x = geo->x;
-      current.y = geo->y;
-      client_apply_current_visual_geometry(c, &current, geo, interact);
-    }
-    return;
-  }
-#endif
-
-  if (size_changed) {
-    client_request_surface_size(c, geo, &prev);
-  } else {
-    struct wlr_box current = has_current ? c->current_geom : *geo;
-    current.x = geo->x;
-    current.y = geo->y;
-    client_apply_current_visual_geometry(c, &current, geo, interact);
-  }
+  if (geo->width != c->geom.width || geo->height != c->geom.height)
+    client_request_surface_size(c, geo, &c->geom);
+  else
+    client_apply_visual_geometry(c, geo);
+  c->geom = *geo;
 }
 
 static void start_animation_at(Client *c, const struct wlr_box *target, const struct wlr_box *start,
@@ -1791,10 +1692,10 @@ static void start_animation_at(Client *c, const struct wlr_box *target, const st
     c->anim.start_time = *start_time;
   else
     clock_gettime(CLOCK_MONOTONIC, &c->anim.start_time);
-  c->anim.active = 1;
   if (c->anim.projected.width > c->anim.target.width ||
       c->anim.projected.height > c->anim.target.height)
     client_request_surface_size(c, &c->anim.projected, NULL);
+  c->anim.active = 1;
 }
 
 static int client_has_initial_position(Client *c, Monitor *m) {
@@ -1848,7 +1749,6 @@ static void start_layout_animation(Client *c, Monitor *m, const struct wlr_box *
 
   c->is_tag_switch_anim = 0;
   if (has_initial_start) {
-    client_apply_visual_geometry(c, &start);
     start_animation_at(c, target, &start, 1.0f, NULL);
     return;
   }
@@ -2060,7 +1960,7 @@ static int step_client_animation_frame(Client *c, const struct timespec *now) {
   float opacity, progress;
 
   sample_animation_state(&c->anim, now, &geom, &opacity, &progress, NULL);
-  client_request_geometry(c, &geom, 0);
+  client_request_geometry(c, &geom);
   client_apply_visual_geometry(c, &geom);
   apply_client_opacity(c, opacity);
   if (progress >= 1.0f) {
@@ -2490,8 +2390,7 @@ void closemon(Monitor *m) {
                                   .y = c->geom.y,
                                   .width = c->geom.width,
                                   .height = c->geom.height,
-                              },
-                              0);
+                              });
     if (c->mon == m)
       setmon(c, selmon, c->tags);
   }
@@ -2540,11 +2439,8 @@ void commitnotify(struct wl_listener *listener, void *data) {
 
   if (c->surface.xdg->initial_commit) {
     applyrules(c);
-    if (c->mon) {
+    if (c->mon)
       client_set_scale(client_surface(c), c->mon->wlr_output->scale);
-    }
-    if (client_has_initial_position(c, c->mon))
-      c->opacity = 0.0f;
     setmon(c, NULL, 0);
     wlr_xdg_toplevel_set_wm_capabilities(c->surface.xdg->toplevel,
                                          WLR_XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN);
@@ -2553,21 +2449,15 @@ void commitnotify(struct wl_listener *listener, void *data) {
   }
 
   if (c->scene) {
-    if (client_get_xdg_committed_size(c, &size)) {
-      client_apply_committed_geometry(c,
-                                      size.width + 2 * c->bw,
-                                      size.height + 2 * c->bw);
-    }
-
+    if (client_get_xdg_committed_size(c, &size))
+      client_apply_visual_geometry(c, &(struct wlr_box){
+                                          .x = c->geom.x,
+                                          .y = c->geom.y,
+                                          .width = MIN(size.width + 2 * (int)c->bw, c->geom.width),
+                                          .height = MIN(size.height + 2 * (int)c->bw, c->geom.height)});
     if (c->pending_configure_serial && c->pending_configure_serial == c->surface.xdg->current.configure_serial)
       c->pending_configure_serial = 0;
-
-    if (!c->anim.active) {
-      client_set_scheduled_size(
-          c, client_should_use_visual_geometry(c, &c->current_geom, &c->geom)
-                 ? &c->geom
-                 : &c->current_geom);
-    }
+    client_set_scheduled_size(c, &c->geom);
   }
 }
 
@@ -2592,8 +2482,8 @@ void commitpopup(struct wl_listener *listener, void *data) {
     return;
   }
   box = type == LayerShell ? l->mon->m : c->mon->w;
-  box.x -= type == LayerShell ? l->scene->node.x : c->current_geom.x;
-  box.y -= type == LayerShell ? l->scene->node.y : c->current_geom.y;
+  box.x -= type == LayerShell ? l->scene->node.x : c->geom.x;
+  box.y -= type == LayerShell ? l->scene->node.y : c->geom.y;
   wlr_xdg_popup_unconstrain_from_box(popup, &box);
   wl_list_remove(&listener->link);
   free(listener);
@@ -2842,8 +2732,8 @@ void cursorwarptohint(void) {
   toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
   if (c && active_constraint->current.cursor_hint.enabled) {
     wlr_cursor_warp(cursor, NULL,
-                    sx + c->current_geom.x + c->bw,
-                    sy + c->current_geom.y + c->bw);
+                    sx + c->geom.x + c->bw,
+                    sy + c->geom.y + c->bw);
     wlr_seat_pointer_warp(active_constraint->seat, sx, sy);
   }
 }
@@ -3271,8 +3161,8 @@ void mapnotify(struct wl_listener *listener, void *data) {
   if (p) {
     c->isfloating = 1;
     if (p->mon) {
-      c->geom.x = p->current_geom.x + (p->current_geom.width - c->geom.width) / 2;
-      c->geom.y = p->current_geom.y + (p->current_geom.height - c->geom.height) / 2;
+      c->geom.x = p->geom.x + (p->geom.width - c->geom.width) / 2;
+      c->geom.y = p->geom.y + (p->geom.height - c->geom.height) / 2;
     }
     setmon(c, p->mon, p->tags);
   } else {
@@ -3341,8 +3231,8 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx, dou
     if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove) {
       toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
       if (c && active_constraint->surface == seat->pointer_state.focused_surface) {
-        sx = cursor->x - c->current_geom.x - c->bw;
-        sy = cursor->y - c->current_geom.y - c->bw;
+        sx = cursor->x - c->geom.x - c->bw;
+        sy = cursor->y - c->geom.y - c->bw;
         if (wlr_region_confine(&active_constraint->region, sx, sy,
                                sx + dx, sy + dy, &sx_confined, &sy_confined)) {
           dx = sx_confined - sx;
@@ -3368,20 +3258,18 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx, dou
                             &(struct wlr_box){
                                 .x = (int)(cursor->x) - grabcx,
                                 .y = (int)(cursor->y) - grabcy,
-                                .width = grabc->current_geom.width,
-                                .height = grabc->current_geom.height,
-                            },
-                            1);
+                                .width = grabc->geom.width,
+                                .height = grabc->geom.height,
+                            });
     return;
   } else if (cursor_mode == CurResize) {
     client_request_geometry(grabc,
                             &(struct wlr_box){
-                                .x = grabc->current_geom.x,
-                                .y = grabc->current_geom.y,
-                                .width = (int)(cursor->x) - grabc->current_geom.x,
-                                .height = (int)(cursor->y) - grabc->current_geom.y,
-                            },
-                            1);
+                                .x = grabc->geom.x,
+                                .y = grabc->geom.y,
+                                .width = (int)(cursor->x) - grabc->geom.x,
+                                .height = (int)(cursor->y) - grabc->geom.y,
+                            });
     return;
   }
 
@@ -3406,14 +3294,14 @@ void moveresize(const Arg *arg) {
   setfloating(grabc, 1);
   switch (cursor_mode = arg->ui) {
   case CurMove:
-    grabcx = (int)(cursor->x) - grabc->current_geom.x;
-    grabcy = (int)(cursor->y) - grabc->current_geom.y;
+    grabcx = (int)(cursor->x) - grabc->geom.x;
+    grabcy = (int)(cursor->y) - grabc->geom.y;
     wlr_cursor_set_xcursor(cursor, cursor_mgr, "fleur");
     break;
   case CurResize:
     wlr_cursor_warp_closest(cursor, NULL,
-                            grabc->current_geom.x + grabc->current_geom.width,
-                            grabc->current_geom.y + grabc->current_geom.height);
+                            grabc->geom.x + grabc->geom.width,
+                            grabc->geom.y + grabc->geom.height);
     wlr_cursor_set_xcursor(cursor, cursor_mgr, "se-resize");
     break;
   }
@@ -3734,7 +3622,7 @@ void setmon(Client *c, Monitor *m, uint32_t newtags) {
   if (m) {
     c->tags = newtags ? newtags : m->tagset[m->seltags];
     if (c->isfloating || c->isfullscreen || !m->lt[m->sellt]->arrange)
-      client_request_geometry(c, &c->geom, 0);
+      client_request_geometry(c, &c->geom);
     suppress_arrange++;
     setfullscreen(c, c->isfullscreen);
     setfloating(c, c->isfloating);
@@ -4119,7 +4007,7 @@ void updatemons(struct wl_listener *listener, void *data) {
     arrangelayers(m);
     arrange(m);
     if ((c = focustop(m)) && c->isfullscreen)
-      client_request_geometry(c, &m->m, 0);
+      client_request_geometry(c, &m->m);
 
     m->gamma_lut_changed = 1;
 
