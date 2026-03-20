@@ -1696,6 +1696,8 @@ static void start_animation_at(Client *c, const struct wlr_box *target, const st
       c->anim.projected.height > c->anim.target.height)
     client_request_surface_size(c, &c->anim.projected, NULL);
   c->anim.active = 1;
+  if (c->mon && c->mon->wlr_output)
+    wlr_output_schedule_frame(c->mon->wlr_output);
 }
 
 static int client_has_initial_position(Client *c, Monitor *m) {
@@ -1808,6 +1810,8 @@ static void start_layer_surface_animation(LayerSurface *l, const struct wlr_box 
   l->anim.target_opacity = 1.0f;
   clock_gettime(CLOCK_MONOTONIC, &l->anim.start_time);
   l->anim.active = 1;
+  if (l->mon && l->mon->wlr_output)
+    wlr_output_schedule_frame(l->mon->wlr_output);
 }
 
 static void snapshot_close_overlay_buffer(struct wlr_scene_buffer *buffer, int sx, int sy,
@@ -1880,7 +1884,8 @@ static void transfer_client_borders_to_close_overlay(CloseOverlay *overlay, Clie
 static void activate_close_overlay(CloseOverlay *overlay) {
   clock_gettime(CLOCK_MONOTONIC, &overlay->start_time);
   wl_list_insert(close_overlays.prev, &overlay->link);
-}
+  if (overlay->mon && overlay->mon->wlr_output)
+    wlr_output_schedule_frame(overlay->mon->wlr_output);}
 
 static CloseOverlay *create_close_overlay_base(Monitor *mon, const struct wlr_box *geom) {
   CloseOverlay *overlay = ecalloc(1, sizeof(*overlay));
