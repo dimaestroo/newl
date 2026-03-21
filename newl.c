@@ -3564,7 +3564,7 @@ void setmon(Client *c, Monitor *m, uint32_t newtags) {
     suppress_arrange--;
     arrange(m);
   }
-  focusclient(focustop(selmon), 1);
+  focusclient(focustop(selmon), m != NULL);
 }
 
 void setpsel(struct wl_listener *listener, void *data) {
