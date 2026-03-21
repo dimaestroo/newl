@@ -1015,8 +1015,6 @@ static void togglebar(const Arg *arg) {
       zdwl_ipc_output_v2_send_toggle_visibility(ipc_output->resource);
 }
 
-
-
 static float get_x_for_t(const struct BezierCurve *curve, float t) {
   float t2 = t * t;
   float t3 = t2 * t;
@@ -1696,7 +1694,6 @@ static void init_bezier(void) {
   }
 }
 
-
 static void applyrules(Client *c) {
   const char *appid, *title;
   uint32_t newtags = 0;
@@ -1814,7 +1811,6 @@ static void pushfirstbottom(const Arg *arg) {
   }
   arrange(selmon);
 }
-
 
 static void arrangelayer(Monitor *m, struct wl_list *list, struct wlr_box *usable_area, int exclusive) {
   LayerSurface *l;
@@ -2887,7 +2883,7 @@ static void motionabsolute(struct wl_listener *listener, void *data) {
 }
 
 static void motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
-                  double dx_unaccel, double dy_unaccel) {
+                         double dx_unaccel, double dy_unaccel) {
   double sx = 0, sy = 0, sx_confined, sy_confined;
   Client *c, *w = NULL;
   LayerSurface *l = NULL;
@@ -3043,7 +3039,7 @@ static void outputmgrtest(struct wl_listener *listener, void *data) {
 }
 
 static void pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
-                  uint32_t time) {
+                         uint32_t time) {
   struct timespec now;
 
   if (surface != seat->pointer_state.focused_surface &&
@@ -3309,7 +3305,6 @@ static void defaultgaps(const Arg *arg) {
 static void incgaps(const Arg *arg) {
   setgaps(selmon->gaps + arg->i);
 }
-
 
 static void setmon(Client *c, Monitor *m, uint32_t newtags) {
   Monitor *oldmon = c->mon;
@@ -3932,7 +3927,7 @@ static Monitor *xytomon(double x, double y) {
 }
 
 static void xytonode(double x, double y, struct wlr_surface **psurface,
-              Client **pc, LayerSurface **pl, double *nx, double *ny) {
+                     Client **pc, LayerSurface **pl, double *nx, double *ny) {
   struct wlr_scene_node *node, *pnode;
   struct wlr_surface *surface = NULL;
   Client *c = NULL;
