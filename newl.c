@@ -3151,10 +3151,17 @@ void motionabsolute(struct wl_listener *listener, void *data) {
 void motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
                   double dx_unaccel, double dy_unaccel) {
   double sx = 0, sy = 0, sx_confined, sy_confined;
-  Client *c = NULL;
+  Client *c, *w = NULL;
+  LayerSurface *l = NULL;
   struct wlr_surface *surface = NULL;
   struct wlr_pointer_constraint_v1 *constraint;
   xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
+  if (cursor_mode == CurPressed && !seat->drag && surface != seat->pointer_state.focused_surface && toplevel_from_wlr_surface(seat->pointer_state.focused_surface, &w, &l) >= 0) {
+    c = w;
+    surface = seat->pointer_state.focused_surface;
+    sx = cursor->x - (l ? l->scene->node.x : w->geom.x);
+    sy = cursor->y - (l ? l->scene->node.y : w->geom.y);
+  }
   if (time) {
     wlr_relative_pointer_manager_v1_send_relative_motion(
         relative_pointer_mgr, seat, (uint64_t)time * 1000,
