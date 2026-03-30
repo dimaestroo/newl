@@ -2824,7 +2824,6 @@ static void mapnotify(struct wl_listener *listener, void *data) {
     goto unset_fullscreen;
 
   client_create_borders(c);
-  client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
   wl_list_insert(clients.prev, &c->link);
 
   if (p) {
@@ -3198,6 +3197,10 @@ static void setcursorshape(struct wl_listener *listener, void *data) {
 static void setfloating(Client *c, int floating) {
   Client *p = client_get_parent(c);
   c->isfloating = floating;
+  if (client_surface(c)->mapped)
+    client_set_tiled(c, c->isfloating ? WLR_EDGE_NONE
+                                      : WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
+
   if (!c->mon || !client_surface(c)->mapped || !c->mon->lt[c->mon->sellt]->arrange)
     return;
   wlr_scene_node_reparent(&c->scene->node, layers[c->isfullscreen ||
