@@ -271,6 +271,7 @@ struct Monitor {
   int switch_animate;
   int switch_dir;
   int gaps;
+  Client **focus_anchors;
 };
 typedef struct {
   const char *name;
@@ -377,6 +378,7 @@ static void dwl_ipc_output_set_tags(struct wl_client *client, struct wl_resource
 static void arrange(Monitor *m);
 static void setmon(Client *c, Monitor *m, uint32_t newtags);
 static void checkidleinhibitor(struct wlr_surface *exclude);
+static void clear_focus_anchors(Client *c);
 static void motionnotify(uint32_t time, struct wlr_input_device *device, double sx,
                          double sy, double sx_unaccel, double sy_unaccel);
 static void client_request_geometry(Client *c, const struct wlr_box *geo);
@@ -388,6 +390,9 @@ static Client *focustop(Monitor *m);
 static void requestdecorationmode(struct wl_listener *listener, void *data);
 static void destroydecoration(struct wl_listener *listener, void *data);
 static void destroyidleinhibitor(struct wl_listener *listener, void *data);
+static Client *focus_anchor_for(Monitor *m, uint32_t tags);
+static void focus_anchor_set(Client *c);
+static void focus_anchor_set_fallbacks(Client *anchor);
 static void keypress(struct wl_listener *listener, void *data);
 static void keypressmod(struct wl_listener *listener, void *data);
 static int keyrepeat(void *data);
@@ -444,7 +449,6 @@ static struct wlr_xdg_activation_v1 *activation;
 static struct wlr_xdg_decoration_manager_v1 *xdg_decoration_mgr;
 static struct wl_list clients;
 static struct wl_list close_overlays;
-static Client *focus_anchor;
 static struct wlr_idle_notifier_v1 *idle_notifier;
 static struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
 static struct wlr_layer_shell_v1 *layer_shell;
@@ -622,15 +626,85 @@ client_is_x11(Client *c) {
 }
 
 static Client *
-focus_fallback_from(Client *anchor, Monitor *m) {
+focus_fallback_from(Client *anchor, Monitor *m, uint32_t tags) {
   Client *c;
   struct wl_list *l;
   for (l = anchor->link.prev; l != &clients; l = l->prev) {
     c = wl_container_of(l, c, link);
-    if (VISIBLEON(c, m))
+    if (VISIBLEONTAGS(c, m, tags))
       return c;
   }
   return NULL;
+}
+
+static void
+clear_focus_anchors(Client *c) {
+  Monitor *m;
+  uint32_t mask;
+  unsigned int tag;
+
+  wl_list_for_each(m, &mons, link) {
+    if (!m->focus_anchors)
+      continue;
+    for (mask = TAGMASK; mask; mask &= mask - 1) {
+      tag = __builtin_ctz(mask);
+      if (m->focus_anchors[tag] == c)
+        m->focus_anchors[tag] = NULL;
+    }
+  }
+}
+
+static Client *
+focus_anchor_for(Monitor *m, uint32_t tags) {
+  Client *c;
+  uint32_t mask;
+  unsigned int tag;
+
+  if (!m || !m->focus_anchors || !tags)
+    return NULL;
+
+  wl_list_for_each_reverse(c, &clients, link) {
+    if (!VISIBLEONTAGS(c, m, tags))
+      continue;
+    for (mask = tags; mask; mask &= mask - 1) {
+      tag = __builtin_ctz(mask);
+      if (m->focus_anchors[tag] == c)
+        return c;
+    }
+  }
+  return NULL;
+}
+
+static void
+focus_anchor_set(Client *c) {
+  Monitor *m;
+  uint32_t tags, mask;
+  unsigned int tag;
+
+  if (!c || !(m = c->mon) || !m->focus_anchors)
+    return;
+
+  tags = m->tagset[m->seltags] & c->tags;
+  for (mask = tags; mask; mask &= mask - 1) {
+    tag = __builtin_ctz(mask);
+    m->focus_anchors[tag] = c;
+  }
+}
+
+static void
+focus_anchor_set_fallbacks(Client *anchor) {
+  Monitor *m = anchor ? anchor->mon : NULL;
+  uint32_t mask;
+  unsigned int tag;
+
+  if (!m || !m->focus_anchors)
+    return;
+
+  for (mask = TAGMASK; mask; mask &= mask - 1) {
+    tag = __builtin_ctz(mask);
+    if (m->focus_anchors[tag] == anchor)
+      m->focus_anchors[tag] = focus_fallback_from(anchor, m, 1u << tag);
+  }
 }
 
 static inline struct wlr_surface *
@@ -750,12 +824,14 @@ static inline void client_get_geometry(Client *c, struct wlr_box *geom) {
   if (client_is_x11(c)) {
     geom->x = c->surface.xwayland->x;
     geom->y = c->surface.xwayland->y;
-    geom->width = c->surface.xwayland->width;
-    geom->height = c->surface.xwayland->height;
+    geom->width = MAX(c->surface.xwayland->width, 1) + 2 * c->bw;
+    geom->height = MAX(c->surface.xwayland->height, 1) + 2 * c->bw;
     return;
   }
 #endif
   *geom = c->surface.xdg->geometry;
+  geom->width = MAX(geom->width, 1) + 2 * c->bw;
+  geom->height = MAX(geom->height, 1) + 2 * c->bw;
 }
 
 static inline Client *client_get_parent(Client *c) {
@@ -1238,36 +1314,13 @@ static void client_configure_x11_surface(Client *c, const struct wlr_box *geo,
 #endif
 
 static void client_handle_x11_commit(Client *c) {
-  if (c->scene && client_surface(c)->mapped) {
+  if (c->scene && client_surface(c)->mapped)
     client_apply_visual_geometry(c, &(struct wlr_box){
                                         .x = client_is_unmanaged(c) ? c->surface.xwayland->x - (int)c->bw : c->geom.x,
                                         .y = client_is_unmanaged(c) ? c->surface.xwayland->y - (int)c->bw : c->geom.y,
                                         .width = MAX(c->surface.xwayland->width, 1) + 2 * c->bw,
                                         .height = MAX(c->surface.xwayland->height, 1) + 2 * c->bw,
                                     });
-  }
-}
-
-static int client_get_xdg_committed_size(Client *c, struct wlr_box *size) {
-  int inner_width, inner_height;
-
-  *size = c->surface.xdg->geometry;
-  if (size->width <= 0 || size->height <= 0) {
-    size->width = c->surface.xdg->surface->current.width;
-    size->height = c->surface.xdg->surface->current.height;
-  }
-
-  if (size->width <= 0 || size->height <= 0)
-    return 0;
-
-  inner_width = MAX(c->geom.width, 1 + 2 * (int)c->bw) - 2 * c->bw;
-  inner_height = MAX(c->geom.height, 1 + 2 * (int)c->bw) - 2 * c->bw;
-  if ((size->width != inner_width || size->height != inner_height) && c->surface.xdg->surface->current.width == inner_width && c->surface.xdg->surface->current.height == inner_height) {
-    size->width = c->surface.xdg->surface->current.width;
-    size->height = c->surface.xdg->surface->current.height;
-  }
-
-  return 1;
 }
 
 static void client_create_borders(Client *c) {
@@ -1395,17 +1448,15 @@ static int prepare_initial_client_position(Client *c, Monitor *m, const struct w
                                            struct wlr_box *start) {
   if (!c->initial_position)
     return 0;
-
   *start = *target;
-  if (!c->isfloating && !c->isfullscreen && m && m->lt[m->sellt]->arrange) {
+  if (!client_is_float_type(c)) {
     start->width = (int)(target->width * initial_layout_animation_scale);
     start->height = (int)(target->height * initial_layout_animation_scale);
     start->x = target->x + (target->width - start->width) / 2;
     start->y = target->y + (target->height - start->height) / 2;
-  } else if (c->isfloating) {
+  } else {
     apply_initial_box_offset(start, 0, 1);
   }
-
   c->opacity = 0.0f;
   c->initial_position = 0;
   return 1;
@@ -2044,6 +2095,7 @@ static void cleanupmon(struct wl_listener *listener, void *data) {
   wlr_scene_output_destroy(m->scene_output);
 
   closemon(m);
+  free(m->focus_anchors);
   free(m);
 }
 
@@ -2107,15 +2159,12 @@ static void commitlayersurfacenotify(struct wl_listener *listener, void *data) {
 
 static void commitnotify(struct wl_listener *listener, void *data) {
   Client *c = wl_container_of(listener, c, commit);
-  struct wlr_box size;
-
 #ifdef XWAYLAND
   if (client_is_x11(c)) {
     client_handle_x11_commit(c);
     return;
   }
 #endif
-
   if (c->surface.xdg->initial_commit) {
     applyrules(c);
     if (c->mon)
@@ -2126,15 +2175,12 @@ static void commitnotify(struct wl_listener *listener, void *data) {
     if (c->decoration)
       requestdecorationmode(&c->set_decoration_mode, c->decoration);
   }
-
-  if (c->scene) {
-    if (client_get_xdg_committed_size(c, &size))
-      client_apply_visual_geometry(c, &(struct wlr_box){
-                                          .x = c->geom.x,
-                                          .y = c->geom.y,
-                                          .width = MIN(size.width + 2 * (int)c->bw, c->geom.width),
-                                          .height = MIN(size.height + 2 * (int)c->bw, c->geom.height)});
-  }
+  if (c->scene)
+    client_apply_visual_geometry(c, &(struct wlr_box){
+                                        .x = c->geom.x,
+                                        .y = c->geom.y,
+                                        .width = MIN(c->surface.xdg->surface->current.width + 2 * (int)c->bw, c->geom.width),
+                                        .height = MIN(c->surface.xdg->surface->current.height + 2 * (int)c->bw, c->geom.height)});
 }
 
 static void commitpopup(struct wl_listener *listener, void *data) {
@@ -2273,6 +2319,7 @@ static void createmon(struct wl_listener *listener, void *data) {
 
   m = wlr_output->data = ecalloc(1, sizeof(*m));
   m->wlr_output = wlr_output;
+  m->focus_anchors = ecalloc(TAGCOUNT, sizeof(*m->focus_anchors));
 
   wl_list_init(&m->dwl_ipc_outputs);
 
@@ -2486,8 +2533,7 @@ static void destroylocksurface(struct wl_listener *listener, void *data) {
 
 static void destroynotify(struct wl_listener *listener, void *data) {
   Client *c = wl_container_of(listener, c, destroy);
-  if (c == focus_anchor)
-    focus_anchor = NULL;
+  clear_focus_anchors(c);
   wl_list_remove(&c->destroy.link);
   wl_list_remove(&c->set_title.link);
   wl_list_remove(&c->fullscreen.link);
@@ -2569,7 +2615,7 @@ static void focusclient(Client *c, int lift) {
   }
 
   if (c && !client_is_unmanaged(c)) {
-    focus_anchor = c;
+    focus_anchor_set(c);
     selmon = c->mon;
     c->isurgent = 0;
 
@@ -2632,8 +2678,10 @@ static void focusstack(const Arg *arg) {
 
 static Client *focustop(Monitor *m) {
   Client *c;
-  if (focus_anchor && VISIBLEON(focus_anchor, m))
-    return focus_anchor;
+  uint32_t tags = m ? m->tagset[m->seltags] : 0;
+
+  if ((c = focus_anchor_for(m, tags)) && VISIBLEON(c, m))
+    return c;
   wl_list_for_each_reverse(c, &clients, link) {
     if (VISIBLEON(c, m))
       return c;
@@ -2804,8 +2852,6 @@ static void mapnotify(struct wl_listener *listener, void *data) {
   Client *w, *c = wl_container_of(listener, c, map);
   Monitor *m;
 
-  p = client_get_parent(c);
-
   c->scene = client_surface(c)->data = wlr_scene_tree_create(layers[LyrTile]);
   wlr_scene_node_set_enabled(&c->scene->node, client_is_unmanaged(c));
   c->scene_surface = c->type == XDGShell
@@ -2813,10 +2859,6 @@ static void mapnotify(struct wl_listener *listener, void *data) {
                          : wlr_scene_subsurface_tree_create(c->scene, client_surface(c));
   c->scene->node.data = c->scene_surface->node.data = c;
   client_get_geometry(c, &c->geom);
-
-  c->geom.width = MAX(c->geom.width, 1) + 2 * c->bw;
-  c->geom.height = MAX(c->geom.height, 1) + 2 * c->bw;
-
   if (client_wants_fullscreen(c))
     setfullscreen(c, 1);
 
@@ -2826,7 +2868,7 @@ static void mapnotify(struct wl_listener *listener, void *data) {
   client_create_borders(c);
   wl_list_insert(clients.prev, &c->link);
 
-  if (p) {
+  if ((p = client_get_parent(c))) {
     c->isfloating = 1;
     if (p->mon) {
       c->geom.x = p->geom.x + (p->geom.width - c->geom.width) / 2;
@@ -3802,8 +3844,7 @@ static void unmapnotify(struct wl_listener *listener, void *data) {
     if (c->scene)
       create_close_overlay(c, &c->geom);
     c->anim.active = 0;
-    if (c == focus_anchor)
-      focus_anchor = focus_fallback_from(c, c->mon);
+    focus_anchor_set_fallbacks(c);
     wl_list_remove(&c->link);
     setmon(c, NULL, 0);
   }
