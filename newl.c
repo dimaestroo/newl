@@ -802,6 +802,15 @@ client_get_appid(Client *c) {
   return c->surface.xdg->toplevel->app_id ? c->surface.xdg->toplevel->app_id : "broken";
 }
 
+static inline struct wlr_box monitor_get_single_client_box(Monitor *m) {
+  return (struct wlr_box){
+      .x = m->w.x + m->gaps * enablegaps,
+      .y = m->w.y + m->gaps * enablegaps,
+      .width = m->w.width - 2 * m->gaps * enablegaps,
+      .height = m->w.height - 2 * m->gaps * enablegaps,
+  };
+}
+
 static inline void client_get_clip(Client *c, struct wlr_box *clip, const struct wlr_box *geom) {
   *clip = (struct wlr_box){
       .x = 0,
@@ -1777,7 +1786,7 @@ static void applyrules(Client *c) {
 static void arrange(Monitor *m) {
   Client *c;
   struct wlr_box target;
-  int should_show;
+  int arranged, should_show;
 
   if (!m->wlr_output->enabled)
     return;
@@ -1800,29 +1809,29 @@ static void arrange(Monitor *m) {
   }
 
   strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
+  arranged = m->lt[m->sellt]->arrange != NULL;
 
   wl_list_for_each(c, &clients, link) {
     if (c->mon != m || c->scene->node.parent == layers[LyrFS])
       continue;
 
     wlr_scene_node_reparent(&c->scene->node,
-                            (!m->lt[m->sellt]->arrange && c->isfloating)
-                                ? layers[LyrTile]
-                            : (m->lt[m->sellt]->arrange && c->isfloating)
-                                ? layers[LyrFloat]
-                                : c->scene->node.parent);
+                            c->isfloating ? layers[arranged ? LyrFloat : LyrTile]
+                                          : c->scene->node.parent);
   }
 
-  if (m->lt[m->sellt]->arrange)
+  if (arranged)
     m->lt[m->sellt]->arrange(m);
 
   wl_list_for_each(c, &clients, link) {
     if (c->mon != m || !VISIBLEON(c, m))
       continue;
-    if (m->lt[m->sellt]->arrange && !c->isfloating && !c->isfullscreen)
+    if (arranged && !c->isfloating && !c->isfullscreen)
       continue;
 
-    target = c->isfullscreen ? m->m : c->geom;
+    target = c->isfullscreen ? m->m
+             : !arranged && !c->isfloating ? monitor_get_single_client_box(m)
+                                           : c->geom;
     start_layout_animation(c, m, &target);
   }
   motionnotify(0, NULL, 0, 0, 0, 0);
@@ -2896,13 +2905,14 @@ static void maximizenotify(struct wl_listener *listener, void *data) {
 
 static void monocle(Monitor *m) {
   Client *c;
+  struct wlr_box target = monitor_get_single_client_box(m);
   int n = 0;
 
   wl_list_for_each(c, &clients, link) {
     if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
       continue;
     n++;
-    start_layout_animation(c, m, &m->w);
+    start_layout_animation(c, m, &target);
   }
   if (n)
     snprintf(m->ltsymbol, LENGTH(m->ltsymbol), "[%d]", n);
@@ -3738,18 +3748,17 @@ static void tile(Monitor *m) {
   wl_list_for_each(c, &clients, link) if (VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen)
       n++;
 
-  if (n == 0)
+  if (!n)
     return;
-  if (n > 1)
-    mw = (int)((m->w.width - m->gaps * enablegaps) * m->mfact);
-  else
-    mw = m->w.width - m->gaps * enablegaps;
+  mw = (int)((m->w.width - m->gaps * enablegaps) * m->mfact);
   master_y = stack_y = m->w.y + m->gaps * enablegaps;
 
   wl_list_for_each(c, &clients, link) {
     if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
       continue;
-    if (i == 0) {
+    if (n == 1) {
+      target = monitor_get_single_client_box(m);
+    } else if (i == 0) {
       target = (struct wlr_box){
           .x = m->w.x + m->gaps * enablegaps,
           .y = master_y,
