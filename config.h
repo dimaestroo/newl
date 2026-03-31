@@ -9,7 +9,7 @@
                             COLOR_COMPONENT(hex, 8) * COLOR_ALPHA(hex),  \
                             COLOR_ALPHA(hex)}
 #define ANIMATION_DURATION 400.0f // Animation duration in milliseconds
-static const float initial_layout_animation_scale = 0.5f; // Set <= 0.0f to keep the initial size
+static const float initial_layout_animation_scale = 0.5f; // Scale initial client size in respect of the designated target
 static struct BezierCurve bezier = {
     .control_points = {
         {0.0f, 0.0f},
@@ -51,7 +51,6 @@ static const Layout layouts[] = {
     /* symbol     arrange function */
     {"[]=", tile},
     {"><>", NULL}, /* no layout function means floating behavior */
-    {"[M]", monocle},
 };
 
 /* monitors */
@@ -178,7 +177,6 @@ static const Key keys[] = {
     {MODKEY, XKB_KEY_c, killclient, {0}},
     {MODKEY, XKB_KEY_t, setlayout, {.v = &layouts[0]}},
     {MODKEY, XKB_KEY_f, setlayout, {.v = &layouts[1]}},
-    {MODKEY, XKB_KEY_m, setlayout, {.v = &layouts[2]}},
     {MODKEY, XKB_KEY_space, setlayout, {0}},
     {MODKEY | WLR_MODIFIER_SHIFT, XKB_KEY_space, togglefloating, {0}},
     {MODKEY, XKB_KEY_e, togglefullscreen, {0}},

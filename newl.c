@@ -312,7 +312,6 @@ static void chvt(const Arg *arg);
 static void focusmon(const Arg *arg);
 static void focusstack(const Arg *arg);
 static void killclient(const Arg *arg);
-static void monocle(Monitor *m);
 static void moveresize(const Arg *arg);
 static void pushfirstbottom(const Arg *arg);
 static void pushlasttop(const Arg *arg);
@@ -2901,23 +2900,6 @@ static void maximizenotify(struct wl_listener *listener, void *data) {
   Client *c = wl_container_of(listener, c, maximize);
   if (c->surface.xdg->initialized)
     wlr_xdg_surface_schedule_configure(c->surface.xdg);
-}
-
-static void monocle(Monitor *m) {
-  Client *c;
-  struct wlr_box target = monitor_get_single_client_box(m);
-  int n = 0;
-
-  wl_list_for_each(c, &clients, link) {
-    if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
-      continue;
-    n++;
-    start_layout_animation(c, m, &target);
-  }
-  if (n)
-    snprintf(m->ltsymbol, LENGTH(m->ltsymbol), "[%d]", n);
-  if ((c = focustop(m)))
-    wlr_scene_node_raise_to_top(&c->scene->node);
 }
 
 static void motionabsolute(struct wl_listener *listener, void *data) {
