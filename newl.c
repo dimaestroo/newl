@@ -136,7 +136,10 @@ typedef struct {
   struct timespec start_time;
   float start_opacity;
   float target_opacity;
+  float progress;
+  float eased_progress;
   bool active;
+  bool grow;
 } Animation;
 typedef struct {
   unsigned int type;
@@ -436,7 +439,8 @@ static struct wlr_scene_tree *layers[NUM_LAYERS];
 static struct wlr_scene_tree *drag_icon;
 
 static const int layermap[] = {LyrBg, LyrBottom, LyrTop, LyrOverlay};
-static float bezier_max_y = 1.0f;
+static float bezier_peak_y = 1.0f;
+static float bezier_peak_x = 1.0f;
 static struct wlr_renderer *drw;
 static struct wlr_allocator *alloc;
 static struct wlr_compositor *compositor;
@@ -1163,22 +1167,16 @@ static void sample_animation(const Animation *anim, float t, struct wlr_box *geo
   *opacity = fmaxf(0.0f, fminf(anim->start_opacity + (anim->target_opacity - anim->start_opacity) * t, 1.0f));
 }
 
-static void sample_animation_state(const Animation *anim, const struct timespec *now,
-                                   struct wlr_box *geom, float *opacity,
-                                   float *progress, float *eased_progress) {
-  float local_progress, local_eased_progress;
+static void sample_animation_state(Animation *anim, const struct timespec *now,
+                                   struct wlr_box *geom, float *opacity) {
   struct timespec local_now;
   if (!now) {
     clock_gettime(CLOCK_MONOTONIC, &local_now);
     now = &local_now;
   }
-  sample_animation_timing(&anim->start_time, now, &local_progress,
-                          &local_eased_progress);
-  sample_animation(anim, local_eased_progress, geom, opacity);
-  if (progress)
-    *progress = local_progress;
-  if (eased_progress)
-    *eased_progress = local_eased_progress;
+  sample_animation_timing(&anim->start_time, now, &anim->progress,
+                          &anim->eased_progress);
+  sample_animation(anim, anim->eased_progress, geom, opacity);
 }
 
 static int client_is_switch_exiting(Client *c) {
@@ -1253,13 +1251,13 @@ static const float *client_border_base_color(Client *c) {
 
 static void get_projected_animation_box(const Animation *anim, struct wlr_box *projected) {
   *projected = anim->target;
-  if (bezier_max_y <= 1.0f)
+  if (bezier_peak_y <= 1.0f)
     return;
 
   if (anim->target.width != anim->start.width)
-    projected->width = (int)(anim->start.width + (anim->target.width - anim->start.width) * bezier_max_y);
+    projected->width = (int)(anim->start.width + (anim->target.width - anim->start.width) * bezier_peak_y);
   if (anim->target.height != anim->start.height)
-    projected->height = (int)(anim->start.height + (anim->target.height - anim->start.height) * bezier_max_y);
+    projected->height = (int)(anim->start.height + (anim->target.height - anim->start.height) * bezier_peak_y);
 }
 
 static void client_apply_visual_geometry(Client *c, const struct wlr_box *geo) {
@@ -1291,26 +1289,6 @@ static void client_init_common(Client *c, unsigned int type, unsigned int bw,
   c->type = type;
   c->bw = bw;
   c->initial_position = initial_position;
-}
-
-static void client_get_requested_surface_size(Client *c, const struct wlr_box *geo,
-                                              const struct wlr_box *prev,
-                                              uint32_t *width, uint32_t *height) {
-  *width = MAX(c->anim.active ? prev && c->anim.projected.width > c->anim.target.width && geo->width < prev->width
-                                    ? MAX(geo->width, c->anim.target.width)
-                                    : MAX(geo->width,
-                                          MAX(c->anim.target.width, c->anim.projected.width))
-                              : geo->width,
-               1 + 2 * (int)c->bw) -
-           2 * c->bw;
-  *height = MAX(c->anim.active ? prev && c->anim.projected.height > c->anim.target.height && geo->height < prev->height
-                                     ? MAX(geo->height, c->anim.target.height)
-                                     : MAX(geo->height,
-                                           MAX(c->anim.target.height, c->anim.projected.height))
-                               : geo->height,
-                1 + 2 * (int)c->bw) -
-            2 * c->bw;
-  c->geom = *geo;
 }
 
 #ifdef XWAYLAND
@@ -1357,13 +1335,13 @@ static int client_map_unmanaged(Client *c) {
   return 1;
 }
 
-static void client_request_surface_size(Client *c, const struct wlr_box *geo,
-                                        const struct wlr_box *prev) {
+static void client_request_surface_size(Client *c, const struct wlr_box *geo) {
   uint32_t width, height;
   if (!c->mon || !c->scene || !client_surface(c)->mapped)
     return;
 
-  client_get_requested_surface_size(c, geo, prev, &width, &height);
+  width = MAX(c->anim.active ? MAX(geo->width, c->anim.target.width) : geo->width, 1 + 2 * (int)c->bw) - 2 * c->bw;
+  height = MAX(c->anim.active ? MAX(geo->height, c->anim.target.height) : geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw;
 
 #ifdef XWAYLAND
   if (client_is_x11(c)) {
@@ -1391,9 +1369,10 @@ static void client_apply_x11_configure_request(
     return;
   }
 
-  if ((c->isfloating && c != grabc) || !c->mon->lt[c->mon->sellt]->arrange)
-    client_request_surface_size(c, geo, NULL);
-  else
+  if ((c->isfloating && c != grabc) || !c->mon->lt[c->mon->sellt]->arrange) {
+    c->geom = *geo;
+    client_request_surface_size(c, geo);
+  } else
     arrange(c->mon);
 }
 
@@ -1410,21 +1389,22 @@ static void start_client_animation(Client *c, const struct wlr_box *target, cons
     c->anim.start = *start;
   else if (c->anim.active)
     sample_animation_state(&c->anim, NULL, &c->anim.start,
-                           &c->anim.start_opacity, NULL, NULL);
+                           &c->anim.start_opacity);
   else
     c->anim.start = c->geom;
   c->anim.target = *target;
   c->anim.target_opacity = target_opacity;
   c->anim.projected = *target;
   get_projected_animation_box(&c->anim, &c->anim.projected);
+  c->anim.grow = c->anim.projected.width > c->anim.target.width ||
+                 c->anim.projected.height > c->anim.target.height;
 
   if (start_time)
     c->anim.start_time = *start_time;
   else
     clock_gettime(CLOCK_MONOTONIC, &c->anim.start_time);
-  if (c->anim.projected.width > c->anim.target.width ||
-      c->anim.projected.height > c->anim.target.height)
-    client_request_surface_size(c, &c->anim.projected, NULL);
+  if (c->anim.grow)
+    client_request_surface_size(c, &c->anim.projected);
   c->anim.active = 1;
   if (c->mon && c->mon->wlr_output)
     wlr_output_schedule_frame(c->mon->wlr_output);
@@ -1672,15 +1652,14 @@ static void cancel_tag_switch_exit_animations(Monitor *m) {
 }
 
 static int step_client_animation_frame(Client *c, const struct timespec *now) {
-  struct wlr_box geom;
-  float progress;
-  sample_animation_state(&c->anim, now, &geom, &c->opacity, &progress, NULL);
-  client_request_surface_size(c, &geom, &c->geom);
-  client_apply_visual_geometry(c, &geom);
+  sample_animation_state(&c->anim, now, &c->geom, &c->opacity);
+  if ((c->anim.grow && c->anim.progress >= bezier_peak_x) || !c->anim.grow)
+    client_request_surface_size(c, &c->geom);
+  client_apply_visual_geometry(c, &c->geom);
   wlr_scene_node_for_each_buffer(&c->scene->node, set_scene_buffer_opacity,
                                  &c->opacity);
   client_set_border_color(c, client_border_base_color(c));
-  if (progress >= 1.0f) {
+  if (c->anim.progress >= 1.0f) {
     c->anim.active = 0;
     c->is_tag_switch_anim = 0;
     if (c->hide_on_anim_end) {
@@ -1696,14 +1675,13 @@ static int step_client_animation_frame(Client *c, const struct timespec *now) {
 
 static int step_layer_surface_animation_frame(LayerSurface *l, const struct timespec *now) {
   struct wlr_box geom;
-  float progress;
-  sample_animation_state(&l->anim, now, &geom, &l->opacity, &progress, NULL);
+  sample_animation_state(&l->anim, now, &geom, &l->opacity);
   set_layer_surface_geom(l, &geom);
   wlr_scene_node_for_each_buffer(&l->scene->node, set_scene_buffer_opacity,
                                  &l->opacity);
   wlr_scene_node_for_each_buffer(&l->popups->node, set_scene_buffer_opacity,
                                  &l->opacity);
-  if (progress >= 1.0f) {
+  if (l->anim.progress >= 1.0f) {
     l->anim.active = 0;
     return 0;
   }
@@ -1730,12 +1708,16 @@ static int step_close_overlay_frame(CloseOverlay *overlay, const struct timespec
 }
 
 static void init_bezier(void) {
-  bezier_max_y = 1.0f;
+  bezier_peak_y = 1.0f;
+  bezier_peak_x = 1.0f;
   for (int i = 0; i < BAKED_POINTS; ++i) {
     float t = (i + 1) * INV_BAKED_POINTS;
     bezier.baked_points[i].x = get_x_for_t(&bezier, t);
     bezier.baked_points[i].y = get_y_for_t(&bezier, t);
-    bezier_max_y = fmaxf(bezier_max_y, bezier.baked_points[i].y);
+    if (bezier.baked_points[i].y > bezier_peak_y) {
+      bezier_peak_y = bezier.baked_points[i].y;
+      bezier_peak_x = bezier.baked_points[i].x;
+    }
   }
 }
 
@@ -2954,7 +2936,7 @@ static void motionnotify(uint32_t time, struct wlr_input_device *device, double 
   } else if (cursor_mode == CurResize) {
     grabc->geom.width = (int)(cursor->x) - grabc->geom.x;
     grabc->geom.height = (int)(cursor->y) - grabc->geom.y;
-    client_request_surface_size(grabc, &grabc->geom, NULL);
+    client_request_surface_size(grabc, &grabc->geom);
     return;
   }
 
@@ -3862,8 +3844,10 @@ static void updatemons(struct wl_listener *listener, void *data) {
 
     arrangelayers(m);
     arrange(m);
-    if ((c = focustop(m)) && c->isfullscreen)
-      client_request_surface_size(c, &m->m, NULL);
+    if ((c = focustop(m)) && c->isfullscreen) {
+      c->geom = m->m;
+      client_request_surface_size(c, &c->geom);
+    }
 
     m->gamma_lut_changed = 1;
 
