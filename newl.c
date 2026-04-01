@@ -1169,29 +1169,15 @@ static int get_monitor_switch_offset(Monitor *m, uint32_t tags) {
 
   return samples ? offset_sum / samples : 0;
 }
-
-static void get_layer_surface_geom(LayerSurface *l, struct wlr_box *geom) {
-  int x, y;
-
-  wlr_scene_node_coords(&l->scene->node, &x, &y);
-  geom->x = x;
-  geom->y = y;
-  geom->width = MAX((int)l->layer_surface->current.actual_width, 1);
-  geom->height = MAX((int)l->layer_surface->current.actual_height, 1);
-}
-
-static void set_layer_surface_geom(LayerSurface *l, const struct wlr_box *geom) {
-  l->geom = *geom;
+static void layer_surface_apply_visual_geometry(LayerSurface *l, const struct wlr_box *geom) {
   wlr_scene_node_set_position(&l->scene->node, geom->x, geom->y);
   wlr_scene_node_set_position(&l->popups->node, geom->x, geom->y);
 }
 
 static void set_scene_buffer_opacity(struct wlr_scene_buffer *buffer, int sx, int sy, void *data) {
   float opacity = *(float *)data;
-
   (void)sx;
   (void)sy;
-
   wlr_scene_buffer_set_opacity(buffer, opacity);
 }
 
@@ -1336,8 +1322,7 @@ static void start_client_animation(Client *c, const struct wlr_box *target, cons
                                    float target_opacity, const struct timespec *start_time) {
   if (!start && c->anim.active && wlr_box_equal(&c->anim.target, target) &&
       c->anim.target_opacity == target_opacity) {
-    if (c->mon && c->mon->wlr_output)
-      wlr_output_schedule_frame(c->mon->wlr_output);
+    wlr_output_schedule_frame(c->mon->wlr_output);
     return;
   }
   c->anim.start_opacity = c->opacity;
@@ -1362,8 +1347,7 @@ static void start_client_animation(Client *c, const struct wlr_box *target, cons
   if (c->anim.grow)
     client_request_surface_size(c, &c->anim.projected);
   c->anim.active = 1;
-  if (c->mon && c->mon->wlr_output)
-    wlr_output_schedule_frame(c->mon->wlr_output);
+  wlr_output_schedule_frame(c->mon->wlr_output);
 }
 
 static void apply_initial_box_offset(struct wlr_box *box, int dir_x, int dir_y) {
@@ -1450,10 +1434,6 @@ static void prepare_layer_surface_initial_position(LayerSurface *l, const struct
 }
 
 static void start_layer_surface_animation(LayerSurface *l, const struct wlr_box *target) {
-  if (!l->mapped) {
-    set_layer_surface_geom(l, target);
-    return;
-  }
   if (l->initial_position) {
     prepare_layer_surface_initial_position(l, target, &l->anim.start);
     l->anim.start_opacity = 0.0f;
@@ -1466,8 +1446,7 @@ static void start_layer_surface_animation(LayerSurface *l, const struct wlr_box 
   l->anim.target_opacity = 1.0f;
   clock_gettime(CLOCK_MONOTONIC, &l->anim.start_time);
   l->anim.active = 1;
-  if (l->mon && l->mon->wlr_output)
-    wlr_output_schedule_frame(l->mon->wlr_output);
+  wlr_output_schedule_frame(l->mon->wlr_output);
 }
 
 static bool close_overlay_buffer_accepts_input(struct wlr_scene_buffer *buffer, double *sx, double *sy) {
@@ -1488,7 +1467,6 @@ static void snapshot_close_overlay_buffer(struct wlr_scene_buffer *buffer, int s
     if (c->border[i] && &buffer->node == &c->border[i]->node)
       return;
   }
-
   snapshot = ecalloc(1, sizeof(*snapshot));
   snapshot->scene_buffer = wlr_scene_buffer_create(overlay->scene, buffer->buffer);
   snapshot->scene_buffer->point_accepts_input = close_overlay_buffer_accepts_input;
@@ -1545,8 +1523,7 @@ static void transfer_client_borders_to_close_overlay(CloseOverlay *overlay, Clie
 static void activate_close_overlay(CloseOverlay *overlay) {
   clock_gettime(CLOCK_MONOTONIC, &overlay->start_time);
   wl_list_insert(close_overlays.prev, &overlay->link);
-  if (overlay->mon && overlay->mon->wlr_output)
-    wlr_output_schedule_frame(overlay->mon->wlr_output);
+  wlr_output_schedule_frame(overlay->mon->wlr_output);
 }
 
 static CloseOverlay *create_close_overlay_base(Monitor *mon, const struct wlr_box *geom,
@@ -1630,9 +1607,8 @@ static int step_client_animation_frame(Client *c, const struct timespec *now) {
 }
 
 static int step_layer_surface_animation_frame(LayerSurface *l, const struct timespec *now) {
-  struct wlr_box geom;
-  sample_animation_state(&l->anim, now, &geom, &l->opacity);
-  set_layer_surface_geom(l, &geom);
+  sample_animation_state(&l->anim, now, &l->geom, &l->opacity);
+  layer_surface_apply_visual_geometry(l, &l->geom);
   wlr_scene_node_for_each_buffer(&l->scene->node, set_scene_buffer_opacity,
                                  &l->opacity);
   wlr_scene_node_for_each_buffer(&l->popups->node, set_scene_buffer_opacity,
@@ -1797,9 +1773,7 @@ static void pushfirstbottom(const Arg *arg) {
 
 static void arrangelayer(Monitor *m, struct wl_list *list, struct wlr_box *usable_area, int exclusive) {
   LayerSurface *l;
-  struct wlr_box full_area = m->m;
-  struct wlr_box target;
-
+  struct wlr_box full_area = m->m, target;
   wl_list_for_each(l, list, link) {
     struct wlr_layer_surface_v1 *layer_surface = l->layer_surface;
 
@@ -1812,8 +1786,16 @@ static void arrangelayer(Monitor *m, struct wl_list *list, struct wlr_box *usabl
       continue;
 
     wlr_scene_layer_surface_v1_configure(l->scene_layer, &full_area, usable_area);
-    get_layer_surface_geom(l, &target);
-    wlr_scene_node_set_position(&l->popups->node, target.x, target.y);
+    target = (struct wlr_box){
+        .x = l->scene->node.x,
+        .y = l->scene->node.y,
+        .width = MAX((int)l->layer_surface->current.actual_width, 1),
+        .height = MAX((int)l->layer_surface->current.actual_height, 1),
+    };
+    if (!l->mapped) {
+      layer_surface_apply_visual_geometry(l, &target);
+      continue;
+    }
     start_layer_surface_animation(l, &target);
   }
 }
@@ -1981,10 +1963,10 @@ static void cleanup(void) {
   xwayland = NULL;
 #endif
   wl_display_destroy_clients(dpy);
-	if (child_pid > 0) {
-		kill(-child_pid, SIGTERM);
-		waitpid(child_pid, NULL, 0);
-	}
+  if (child_pid > 0) {
+    kill(-child_pid, SIGTERM);
+    waitpid(child_pid, NULL, 0);
+  }
   wlr_xcursor_manager_destroy(cursor_mgr);
 
   destroykeyboardgroup(&kb_group->destroy, NULL);
