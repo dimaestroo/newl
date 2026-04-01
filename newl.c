@@ -380,7 +380,6 @@ static void checkidleinhibitor(struct wlr_surface *exclude);
 static void clear_focus_anchors(Client *c);
 static void motionnotify(uint32_t time, struct wlr_input_device *device, double sx,
                          double sy, double sx_unaccel, double sy_unaccel);
-static void client_request_geometry(Client *c, const struct wlr_box *geo);
 static void destroykeyboardgroup(struct wl_listener *listener, void *data);
 static void closemon(Monitor *m);
 static void destroylocksurface(struct wl_listener *listener, void *data);
@@ -1311,6 +1310,7 @@ static void client_get_requested_surface_size(Client *c, const struct wlr_box *g
                                : geo->height,
                 1 + 2 * (int)c->bw) -
             2 * c->bw;
+  c->geom = *geo;
 }
 
 #ifdef XWAYLAND
@@ -1357,6 +1357,23 @@ static int client_map_unmanaged(Client *c) {
   return 1;
 }
 
+static void client_request_surface_size(Client *c, const struct wlr_box *geo,
+                                        const struct wlr_box *prev) {
+  uint32_t width, height;
+  if (!c->mon || !c->scene || !client_surface(c)->mapped)
+    return;
+
+  client_get_requested_surface_size(c, geo, prev, &width, &height);
+
+#ifdef XWAYLAND
+  if (client_is_x11(c)) {
+    client_configure_x11_surface(c, geo, width, height);
+    return;
+  }
+#endif
+  wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel, (int32_t)width, (int32_t)height);
+}
+
 static void client_apply_x11_configure_request(
     Client *c, struct wlr_xwayland_surface_configure_event *event,
     const struct wlr_box *geo) {
@@ -1375,40 +1392,9 @@ static void client_apply_x11_configure_request(
   }
 
   if ((c->isfloating && c != grabc) || !c->mon->lt[c->mon->sellt]->arrange)
-    client_request_geometry(c, geo);
+    client_request_surface_size(c, geo, NULL);
   else
     arrange(c->mon);
-}
-
-static void client_request_surface_size(Client *c, const struct wlr_box *geo,
-                                        const struct wlr_box *prev) {
-  uint32_t width, height;
-  if (!c->mon || !c->scene || !client_surface(c)->mapped || client_is_unmanaged(c))
-    return;
-
-  client_get_requested_surface_size(c, geo, prev, &width, &height);
-
-#ifdef XWAYLAND
-  if (client_is_x11(c)) {
-    client_configure_x11_surface(c, geo, width, height);
-    return;
-  }
-#endif
-  wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel, (int32_t)width, (int32_t)height);
-}
-
-static void client_request_geometry(Client *c, const struct wlr_box *geo) {
-  if (grabc == c)
-    c->anim.active = 0;
-  if (client_is_unmanaged(c)) {
-    client_apply_visual_geometry(c, geo);
-    return;
-  }
-  if (geo->width != c->geom.width || geo->height != c->geom.height)
-    client_request_surface_size(c, geo, &c->geom);
-  else
-    client_apply_visual_geometry(c, geo);
-  c->geom = *geo;
 }
 
 static void start_client_animation(Client *c, const struct wlr_box *target, const struct wlr_box *start,
@@ -1689,7 +1675,7 @@ static int step_client_animation_frame(Client *c, const struct timespec *now) {
   struct wlr_box geom;
   float progress;
   sample_animation_state(&c->anim, now, &geom, &c->opacity, &progress, NULL);
-  client_request_geometry(c, &geom);
+  client_request_surface_size(c, &geom, &c->geom);
   client_apply_visual_geometry(c, &geom);
   wlr_scene_node_for_each_buffer(&c->scene->node, set_scene_buffer_opacity,
                                  &c->opacity);
@@ -1828,7 +1814,7 @@ static void arrange(Monitor *m) {
     if (arranged && !c->isfloating && !c->isfullscreen)
       continue;
 
-    target = c->isfullscreen ? m->m
+    target = c->isfullscreen               ? m->m
              : !arranged && !c->isfloating ? monitor_get_single_client_box(m)
                                            : c->geom;
     start_layout_animation(c, m, &target);
@@ -2123,13 +2109,8 @@ static void closemon(Monitor *m) {
 
   wl_list_for_each(c, &clients, link) {
     if (c->isfloating && c->geom.x > m->m.width)
-      client_request_geometry(c,
-                              &(struct wlr_box){
-                                  .x = c->geom.x - m->w.width,
-                                  .y = c->geom.y,
-                                  .width = c->geom.width,
-                                  .height = c->geom.height,
-                              });
+      c->geom.x -= m->w.width;
+    client_apply_visual_geometry(c, &c->geom);
     if (c->mon == m)
       setmon(c, selmon, c->tags);
   }
@@ -2962,23 +2943,18 @@ static void motionnotify(uint32_t time, struct wlr_input_device *device, double 
 
   wlr_scene_node_set_position(&drag_icon->node, (int)(cursor->x), (int)(cursor->y));
 
+  if (cursor_mode == CurMove || cursor_mode == CurResize)
+    grabc->anim.active = 0;
+
   if (cursor_mode == CurMove) {
-    client_request_geometry(grabc,
-                            &(struct wlr_box){
-                                .x = (int)(cursor->x) - grabcx,
-                                .y = (int)(cursor->y) - grabcy,
-                                .width = grabc->geom.width,
-                                .height = grabc->geom.height,
-                            });
+    grabc->geom.x = (int)(cursor->x) - grabcx;
+    grabc->geom.y = (int)(cursor->y) - grabcy;
+    client_apply_visual_geometry(grabc, &grabc->geom);
     return;
   } else if (cursor_mode == CurResize) {
-    client_request_geometry(grabc,
-                            &(struct wlr_box){
-                                .x = grabc->geom.x,
-                                .y = grabc->geom.y,
-                                .width = (int)(cursor->x) - grabc->geom.x,
-                                .height = (int)(cursor->y) - grabc->geom.y,
-                            });
+    grabc->geom.width = (int)(cursor->x) - grabc->geom.x;
+    grabc->geom.height = (int)(cursor->y) - grabc->geom.y;
+    client_request_surface_size(grabc, &grabc->geom, NULL);
     return;
   }
 
@@ -3355,7 +3331,7 @@ static void setmon(Client *c, Monitor *m, uint32_t newtags) {
   if (m) {
     c->tags = newtags ? newtags : m->tagset[m->seltags];
     if (c->isfloating || c->isfullscreen || !m->lt[m->sellt]->arrange)
-      client_request_geometry(c, &c->geom);
+      client_apply_visual_geometry(c, &c->geom);
     suppress_arrange++;
     setfullscreen(c, c->isfullscreen);
     setfloating(c, c->isfloating);
@@ -3887,7 +3863,7 @@ static void updatemons(struct wl_listener *listener, void *data) {
     arrangelayers(m);
     arrange(m);
     if ((c = focustop(m)) && c->isfullscreen)
-      client_request_geometry(c, &m->m);
+      client_request_surface_size(c, &m->m, NULL);
 
     m->gamma_lut_changed = 1;
 
