@@ -75,7 +75,6 @@
 static void die(const char *fmt, ...);
 static void *ecalloc(size_t nmemb, size_t size);
 static int fd_set_nonblock(int fd);
-static void terminatechild(pid_t pid, int kill_group);
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 #define MIN(A, B) ((A) < (B) ? (A) : (B))
 #define CLEANMASK(mask) (mask & ~WLR_MODIFIER_CAPS)
@@ -574,49 +573,6 @@ fd_set_nonblock(int fd) {
     return -1;
   }
   return 0;
-}
-
-static void
-terminatechild(pid_t pid, int kill_group) {
-  static const struct timespec wait_step = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
-  int can_wait = 1;
-  int sigpid = kill_group ? -pid : pid;
-  int i;
-  pid_t result;
-  if (pid <= 0)
-    return;
-  result = waitpid(pid, NULL, WNOHANG);
-  if (result == pid)
-    return;
-  if (result < 0 && errno == ECHILD)
-    can_wait = 0;
-  else if (result < 0)
-    return;
-  if (kill(sigpid, SIGTERM) < 0 && errno != ESRCH)
-    return;
-  if (!can_wait)
-    goto sigkill;
-  for (i = 0; i < 50; i++) {
-    result = waitpid(pid, NULL, WNOHANG);
-    if (result == pid || (result < 0 && errno == ECHILD))
-      return;
-    if (result < 0 && errno != EINTR)
-      return;
-    nanosleep(&wait_step, NULL);
-  }
-sigkill:
-  if (kill(sigpid, SIGKILL) < 0 && errno != ESRCH)
-    return;
-  if (!can_wait)
-    return;
-  for (i = 0; i < 50; i++) {
-    result = waitpid(pid, NULL, WNOHANG);
-    if (result == pid || (result < 0 && errno == ECHILD))
-      return;
-    if (result < 0 && errno != EINTR)
-      return;
-    nanosleep(&wait_step, NULL);
-  }
 }
 
 static inline int
@@ -1990,8 +1946,6 @@ static void checkidleinhibitor(struct wlr_surface *exclude) {
 }
 
 static void cleanup(void) {
-  CloseOverlay *overlay, *tmp;
-  size_t i;
   wl_list_remove(&cursor_axis.link);
   wl_list_remove(&cursor_button.link);
   wl_list_remove(&cursor_frame.link);
@@ -2027,12 +1981,10 @@ static void cleanup(void) {
   xwayland = NULL;
 #endif
   wl_display_destroy_clients(dpy);
-  for (i = 0; i < autostart_len; i++) {
-    terminatechild(autostart_pids[i], 1);
-  }
-  terminatechild(child_pid, 1);
-  wl_list_for_each_safe(overlay, tmp, &close_overlays, link)
-      destroy_close_overlay(overlay);
+	if (child_pid > 0) {
+		kill(-child_pid, SIGTERM);
+		waitpid(child_pid, NULL, 0);
+	}
   wlr_xcursor_manager_destroy(cursor_mgr);
 
   destroykeyboardgroup(&kb_group->destroy, NULL);
