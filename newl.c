@@ -309,7 +309,7 @@ struct Vec2 {
   float y;
 };
 struct BezierCurve {
-  struct Vec2 control_points[4];
+  struct Vec2 control_points[2];
   struct Vec2 baked_points[BAKED_POINTS];
 };
 
@@ -1067,9 +1067,8 @@ static float get_x_for_t(const struct BezierCurve *curve, float t) {
   float mt = 1 - t;
   float mt2 = mt * mt;
 
-  return 3 * t * mt2 * curve->control_points[1].x +
-         3 * t2 * mt * curve->control_points[2].x +
-         t3 * curve->control_points[3].x;
+  return 3 * t * mt2 * curve->control_points[0].x +
+         3 * t2 * mt * curve->control_points[1].x + t3;
 }
 
 static float get_y_for_t(const struct BezierCurve *curve, float t) {
@@ -1078,9 +1077,8 @@ static float get_y_for_t(const struct BezierCurve *curve, float t) {
   float mt = 1 - t;
   float mt2 = mt * mt;
 
-  return 3 * t * mt2 * curve->control_points[1].y +
-         3 * t2 * mt * curve->control_points[2].y +
-         t3 * curve->control_points[3].y;
+  return 3 * t * mt2 * curve->control_points[0].y +
+         3 * t2 * mt * curve->control_points[1].y + t3;
 }
 
 static float get_y_for_point(const struct BezierCurve *curve, float x) {
@@ -1118,14 +1116,6 @@ static void sample_animation_timing(const struct timespec *start_time, const str
   *eased_progress = get_y_for_point(&bezier, *progress);
 }
 
-static void sample_animation(const Animation *anim, float t, struct wlr_box *geom, float *opacity) {
-  geom->x = (int)(anim->start.x + (anim->target.x - anim->start.x) * t);
-  geom->y = (int)(anim->start.y + (anim->target.y - anim->start.y) * t);
-  geom->width = (int)(anim->start.width + (anim->target.width - anim->start.width) * t);
-  geom->height = (int)(anim->start.height + (anim->target.height - anim->start.height) * t);
-  *opacity = fmaxf(0.0f, fminf(anim->start_opacity + (anim->target_opacity - anim->start_opacity) * t, 1.0f));
-}
-
 static void sample_animation_state(Animation *anim, const struct timespec *now,
                                    struct wlr_box *geom, float *opacity) {
   struct timespec local_now;
@@ -1135,7 +1125,11 @@ static void sample_animation_state(Animation *anim, const struct timespec *now,
   }
   sample_animation_timing(&anim->start_time, now, &anim->progress,
                           &anim->eased_progress);
-  sample_animation(anim, anim->eased_progress, geom, opacity);
+  geom->x = (int)(anim->start.x + (anim->target.x - anim->start.x) * anim->eased_progress);
+  geom->y = (int)(anim->start.y + (anim->target.y - anim->start.y) * anim->eased_progress);
+  geom->width = (int)(anim->start.width + (anim->target.width - anim->start.width) * anim->eased_progress);
+  geom->height = (int)(anim->start.height + (anim->target.height - anim->start.height) * anim->eased_progress);
+  *opacity = fmaxf(0.0f, fminf(anim->start_opacity + (anim->target_opacity - anim->start_opacity) * anim->eased_progress, 1.0f));
 }
 
 static int client_is_switch_exiting(Client *c) {
@@ -1369,17 +1363,22 @@ static void apply_initial_box_offset(struct wlr_box *box, int dir_x, int dir_y) 
   box->y += dir_y * offset_y;
 }
 
+static void scale_box_about_center(struct wlr_box *box, float scale) {
+  int width = box->width, height = box->height;
+  box->width = (int)(box->width * scale);
+  box->height = (int)(box->height * scale);
+  box->x += (width - box->width) / 2;
+  box->y += (height - box->height) / 2;
+}
+
 static void start_layout_animation(Client *c, Monitor *m, const struct wlr_box *target) {
   const struct wlr_box *start = NULL;
 
   if (c->initial_position) {
     c->anim.start = *target;
-    if (!client_is_float_type(c)) {
-      c->anim.start.width = (int)(target->width * layout_animation_scale);
-      c->anim.start.height = (int)(target->height * layout_animation_scale);
-      c->anim.start.x = target->x + (target->width - c->anim.start.width) / 2;
-      c->anim.start.y = target->y + (target->height - c->anim.start.height) / 2;
-    } else
+    if (!client_is_float_type(c))
+      scale_box_about_center(&c->anim.start, layout_animation_scale);
+    else
       apply_initial_box_offset(&c->anim.start, 0, 1);
     c->opacity = 0.0f;
     c->initial_position = 0;
@@ -1414,16 +1413,10 @@ static void start_layer_surface_animation(LayerSurface *l, const struct wlr_box 
 
   if (l->initial_position) {
     uint32_t anchor = l->layer_surface->current.anchor;
-    int dir_x = ((anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT) &&
-                 !(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT))
-                    ? -1
-                    : (anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT) &&
-                          !(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
-    int dir_y = ((anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP) &&
-                 !(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM))
-                    ? -1
-                    : (anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM) &&
-                          !(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP);
+    int dir_x = !!(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT) -
+                !!(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
+    int dir_y = !!(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM) -
+                !!(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP);
 
     l->anim.start = *target;
     apply_initial_box_offset(&l->anim.start, dir_x,
@@ -1497,7 +1490,6 @@ static void transfer_client_borders_to_close_overlay(CloseOverlay *overlay, Clie
   for (i = 0; i < 4; i++) {
     if (!client->border[i])
       continue;
-
     wlr_scene_node_coords(&client->border[i]->node, &x, &y);
     rect = ecalloc(1, sizeof(*rect));
     rect->scene_rect = client->border[i];
@@ -1517,10 +1509,8 @@ static void transfer_client_borders_to_close_overlay(CloseOverlay *overlay, Clie
 }
 
 static void activate_close_overlay(CloseOverlay *overlay) {
-  overlay->anim.target.width = (int)(overlay->geom.width * layout_animation_scale);
-  overlay->anim.target.height = (int)(overlay->geom.height * layout_animation_scale);
-  overlay->anim.target.x = overlay->geom.x + (overlay->geom.width - overlay->anim.target.width) / 2;
-  overlay->anim.target.y = overlay->geom.y + (overlay->geom.height - overlay->anim.target.height) / 2;
+  overlay->anim.target = overlay->geom;
+  scale_box_about_center(&overlay->anim.target, layout_animation_scale);
   start_animation(&overlay->anim, &overlay->geom, 1.0f,
                   &overlay->anim.target, NULL, 0.0f, NULL);
   wl_list_insert(close_overlays.prev, &overlay->link);

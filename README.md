@@ -48,14 +48,12 @@ newl’s configuration is written in C and is designed for maximum simplicity an
 
   static struct BezierCurve bezier = {
       .control_points = {
-          {0.0f, 0.0f},
           {0.05f, 0.9f},
-          {0.1f, 1.05f},
-          {1.0f, 1.0f}
+          {0.1f, 1.05f}
       }
   };
   ```
-  These settings define the duration and easing function for window and workspace animations. Adjust the Bezier curve control points to fine-tune the animation's acceleration and deceleration.
+  These settings define the duration and easing function for window and workspace animations.`P0` and `P3` are implicitly normalized to `(0,0)` and `(1,1)`.
 
 ### 2. Window Gaps, Focus, and Borders
 

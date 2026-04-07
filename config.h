@@ -12,10 +12,8 @@
 static const float layout_animation_scale = 0.6f; // Scale in & out client size in respect of the designated target
 static struct BezierCurve bezier = {
     .control_points = {
-        {0.0f, 0.0f},
         {0.05f, 0.9f},
-        {0.1f, 1.05f},
-        {1.0f, 1.0f}}};
+        {0.1f, 1.05f}}};
 /* gaps */
 static int enablegaps = 1; /* enables gaps, used by togglegaps */
 static const unsigned int gaps = 10;
