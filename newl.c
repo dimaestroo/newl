@@ -77,6 +77,7 @@ static void *ecalloc(size_t nmemb, size_t size);
 static int fd_set_nonblock(int fd);
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 #define MIN(A, B) ((A) < (B) ? (A) : (B))
+#define SCALE_GEOM(V, F, T) ((F) ? (int)((V) * (T) / (float)(F)) : (V))
 #define CLEANMASK(mask) (mask & ~WLR_MODIFIER_CAPS)
 #define VISIBLEONTAGS(C, M, T) ((M) && (C)->mon == (M) && ((C)->tags & (T)))
 #define VISIBLEON(C, M) VISIBLEONTAGS((C), (M), (M)->tagset[(M)->seltags])
@@ -183,11 +184,13 @@ typedef struct {
 typedef struct {
   struct wl_list link;
   struct wlr_scene_buffer *scene_buffer;
+  struct wlr_box geom;
   float opacity;
 } CloseOverlayBuffer;
 typedef struct {
   struct wl_list link;
   struct wlr_scene_rect *scene_rect;
+  struct wlr_box geom;
   float color[4];
 } CloseOverlayRect;
 typedef struct {
@@ -196,8 +199,8 @@ typedef struct {
   struct wlr_scene_tree *scene;
   struct wl_list buffers;
   struct wl_list rects;
+  Animation anim;
   struct wlr_box geom;
-  struct timespec start_time;
 } CloseOverlay;
 typedef struct {
   CloseOverlay *overlay;
@@ -1202,6 +1205,27 @@ static void get_projected_animation_box(const Animation *anim, struct wlr_box *p
     projected->height = (int)(anim->start.height + (anim->target.height - anim->start.height) * bezier_peak_y);
 }
 
+static void start_animation(Animation *anim, const struct wlr_box *geom, float opacity,
+                            const struct wlr_box *target, const struct wlr_box *start,
+                            float target_opacity, const struct timespec *start_time) {
+  if (!start && anim->active)
+    sample_animation_state(anim, NULL, &anim->start, &anim->start_opacity);
+  else {
+    if (!start)
+      anim->start = *geom;
+    else if (start != &anim->start)
+      anim->start = *start;
+    anim->start_opacity = opacity;
+  }
+  anim->target = *target;
+  anim->target_opacity = target_opacity;
+  if (start_time)
+    anim->start_time = *start_time;
+  else
+    clock_gettime(CLOCK_MONOTONIC, &anim->start_time);
+  anim->active = 1;
+}
+
 static void client_apply_visual_geometry(Client *c, const struct wlr_box *geo) {
   struct wlr_box clip;
 
@@ -1325,28 +1349,15 @@ static void start_client_animation(Client *c, const struct wlr_box *target, cons
     wlr_output_schedule_frame(c->mon->wlr_output);
     return;
   }
-  c->anim.start_opacity = c->opacity;
-  if (start)
-    c->anim.start = *start;
-  else if (c->anim.active)
-    sample_animation_state(&c->anim, NULL, &c->anim.start,
-                           &c->anim.start_opacity);
-  else
-    c->anim.start = c->geom;
-  c->anim.target = *target;
-  c->anim.target_opacity = target_opacity;
+  start_animation(&c->anim, &c->geom, c->opacity, target, start,
+                  target_opacity, start_time);
   c->anim.projected = *target;
   get_projected_animation_box(&c->anim, &c->anim.projected);
   c->anim.grow = c->anim.projected.width > c->anim.target.width ||
                  c->anim.projected.height > c->anim.target.height;
 
-  if (start_time)
-    c->anim.start_time = *start_time;
-  else
-    clock_gettime(CLOCK_MONOTONIC, &c->anim.start_time);
   if (c->anim.grow)
     client_request_surface_size(c, &c->anim.projected);
-  c->anim.active = 1;
   wlr_output_schedule_frame(c->mon->wlr_output);
 }
 
@@ -1358,46 +1369,33 @@ static void apply_initial_box_offset(struct wlr_box *box, int dir_x, int dir_y) 
   box->y += dir_y * offset_y;
 }
 
-static int prepare_initial_client_position(Client *c, Monitor *m, const struct wlr_box *target,
-                                           struct wlr_box *start) {
-  if (!c->initial_position)
-    return 0;
-  *start = *target;
-  if (!client_is_float_type(c)) {
-    start->width = (int)(target->width * initial_layout_animation_scale);
-    start->height = (int)(target->height * initial_layout_animation_scale);
-    start->x = target->x + (target->width - start->width) / 2;
-    start->y = target->y + (target->height - start->height) / 2;
-  } else {
-    apply_initial_box_offset(start, 0, 1);
-  }
-  c->opacity = 0.0f;
-  c->initial_position = 0;
-  return 1;
-}
-
 static void start_layout_animation(Client *c, Monitor *m, const struct wlr_box *target) {
-  struct wlr_box start;
-  int has_initial_start;
+  const struct wlr_box *start = NULL;
 
-  has_initial_start = prepare_initial_client_position(c, m, target, &start);
+  if (c->initial_position) {
+    c->anim.start = *target;
+    if (!client_is_float_type(c)) {
+      c->anim.start.width = (int)(target->width * layout_animation_scale);
+      c->anim.start.height = (int)(target->height * layout_animation_scale);
+      c->anim.start.x = target->x + (target->width - c->anim.start.width) / 2;
+      c->anim.start.y = target->y + (target->height - c->anim.start.height) / 2;
+    } else
+      apply_initial_box_offset(&c->anim.start, 0, 1);
+    c->opacity = 0.0f;
+    c->initial_position = 0;
+    start = &c->anim.start;
+  }
 
   if (m->switch_animate && !VISIBLEONTAGS(c, m, m->prevtagset)) {
-    start = *target;
-    start.x += m->switch_dir * m->m.width + m->switch_offset;
+    c->anim.start = *target;
+    c->anim.start.x += m->switch_dir * m->m.width + m->switch_offset;
     c->hide_on_anim_end = 0;
     c->is_tag_switch_anim = 1;
-    start_client_animation(c, target, &start, 1.0f, &m->switch_start_time);
-    return;
-  }
-
-  c->is_tag_switch_anim = 0;
-  if (has_initial_start) {
-    start_client_animation(c, target, &start, 1.0f, NULL);
-    return;
-  }
-
-  start_client_animation(c, target, NULL, 1.0f, NULL);
+    start = &c->anim.start;
+  } else
+    c->is_tag_switch_anim = 0;
+  start_client_animation(c, target, start, 1.0f,
+                         c->is_tag_switch_anim ? &m->switch_start_time : NULL);
 }
 
 static void start_tag_switch_exit_animation(Client *c, Monitor *m) {
@@ -1411,41 +1409,31 @@ static void start_tag_switch_exit_animation(Client *c, Monitor *m) {
   start_client_animation(c, &target, &c->geom, c->opacity, &m->switch_start_time);
 }
 
-static void prepare_layer_surface_initial_position(LayerSurface *l, const struct wlr_box *target,
-                                                   struct wlr_box *start) {
-  uint32_t anchor = l->layer_surface->current.anchor;
-  int dir_x = 0;
-  int dir_y = 0;
-
-  *start = *target;
-  if ((anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP) && !(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM))
-    dir_y = -1;
-  else if ((anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM) && !(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP))
-    dir_y = 1;
-  else if (!(anchor & (ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM)))
-    dir_y = 1;
-
-  if ((anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT) && !(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT))
-    dir_x = -1;
-  else if ((anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT) && !(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT))
-    dir_x = 1;
-
-  apply_initial_box_offset(start, dir_x, dir_y);
-}
-
 static void start_layer_surface_animation(LayerSurface *l, const struct wlr_box *target) {
+  const struct wlr_box *start = NULL;
+
   if (l->initial_position) {
-    prepare_layer_surface_initial_position(l, target, &l->anim.start);
-    l->anim.start_opacity = 0.0f;
+    uint32_t anchor = l->layer_surface->current.anchor;
+    int dir_x = ((anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT) &&
+                 !(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT))
+                    ? -1
+                    : (anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT) &&
+                          !(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
+    int dir_y = ((anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP) &&
+                 !(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM))
+                    ? -1
+                    : (anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM) &&
+                          !(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP);
+
+    l->anim.start = *target;
+    apply_initial_box_offset(&l->anim.start, dir_x,
+                             dir_y || !(anchor & (ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
+                                                  ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM)));
+    start = &l->anim.start;
+    l->opacity = 0.0f;
     l->initial_position = 0;
-  } else {
-    l->anim.start = l->geom;
-    l->anim.start_opacity = l->opacity;
   }
-  l->anim.target = *target;
-  l->anim.target_opacity = 1.0f;
-  clock_gettime(CLOCK_MONOTONIC, &l->anim.start_time);
-  l->anim.active = 1;
+  start_animation(&l->anim, &l->geom, l->opacity, target, start, 1.0f, NULL);
   wlr_output_schedule_frame(l->mon->wlr_output);
 }
 
@@ -1470,14 +1458,20 @@ static void snapshot_close_overlay_buffer(struct wlr_scene_buffer *buffer, int s
   snapshot = ecalloc(1, sizeof(*snapshot));
   snapshot->scene_buffer = wlr_scene_buffer_create(overlay->scene, buffer->buffer);
   snapshot->scene_buffer->point_accepts_input = close_overlay_buffer_accepts_input;
+  snapshot->geom = (struct wlr_box){
+      .x = sx - overlay->geom.x,
+      .y = sy - overlay->geom.y,
+      .width = buffer->dst_width > 0 ? buffer->dst_width : buffer->buffer->width,
+      .height = buffer->dst_height > 0 ? buffer->dst_height : buffer->buffer->height,
+  };
   snapshot->opacity = buffer->opacity;
   wlr_scene_node_set_position(&snapshot->scene_buffer->node,
-                              sx - overlay->geom.x, sy - overlay->geom.y);
+                              snapshot->geom.x, snapshot->geom.y);
   if (buffer->src_box.width > 0.0f && buffer->src_box.height > 0.0f)
     wlr_scene_buffer_set_source_box(snapshot->scene_buffer, &buffer->src_box);
-  if (buffer->dst_width > 0 && buffer->dst_height > 0)
+  if (snapshot->geom.width > 0 && snapshot->geom.height > 0)
     wlr_scene_buffer_set_dest_size(snapshot->scene_buffer,
-                                   buffer->dst_width, buffer->dst_height);
+                                   snapshot->geom.width, snapshot->geom.height);
   wlr_scene_buffer_set_transform(snapshot->scene_buffer, buffer->transform);
   wlr_scene_buffer_set_filter_mode(snapshot->scene_buffer, buffer->filter_mode);
   wlr_scene_buffer_set_opacity(snapshot->scene_buffer, snapshot->opacity);
@@ -1500,10 +1494,6 @@ static void snapshot_close_overlay_tree(CloseOverlay *overlay, struct wlr_scene_
 static void transfer_client_borders_to_close_overlay(CloseOverlay *overlay, Client *client) {
   CloseOverlayRect *rect;
   int i, x, y;
-
-  if (!client)
-    return;
-
   for (i = 0; i < 4; i++) {
     if (!client->border[i])
       continue;
@@ -1511,17 +1501,28 @@ static void transfer_client_borders_to_close_overlay(CloseOverlay *overlay, Clie
     wlr_scene_node_coords(&client->border[i]->node, &x, &y);
     rect = ecalloc(1, sizeof(*rect));
     rect->scene_rect = client->border[i];
+    rect->geom = (struct wlr_box){
+        .x = x - overlay->geom.x,
+        .y = y - overlay->geom.y,
+        .width = client->border[i]->width,
+        .height = client->border[i]->height,
+    };
     memcpy(rect->color, client->border[i]->color, sizeof(rect->color));
     wlr_scene_node_reparent(&client->border[i]->node, overlay->scene);
     wlr_scene_node_set_position(&client->border[i]->node,
-                                x - overlay->geom.x, y - overlay->geom.y);
+                                rect->geom.x, rect->geom.y);
     wl_list_insert(overlay->rects.prev, &rect->link);
     client->border[i] = NULL;
   }
 }
 
 static void activate_close_overlay(CloseOverlay *overlay) {
-  clock_gettime(CLOCK_MONOTONIC, &overlay->start_time);
+  overlay->anim.target.width = (int)(overlay->geom.width * layout_animation_scale);
+  overlay->anim.target.height = (int)(overlay->geom.height * layout_animation_scale);
+  overlay->anim.target.x = overlay->geom.x + (overlay->geom.width - overlay->anim.target.width) / 2;
+  overlay->anim.target.y = overlay->geom.y + (overlay->geom.height - overlay->anim.target.height) / 2;
+  start_animation(&overlay->anim, &overlay->geom, 1.0f,
+                  &overlay->anim.target, NULL, 0.0f, NULL);
   wl_list_insert(close_overlays.prev, &overlay->link);
   wlr_output_schedule_frame(overlay->mon->wlr_output);
 }
@@ -1623,16 +1624,29 @@ static int step_layer_surface_animation_frame(LayerSurface *l, const struct time
 static int step_close_overlay_frame(CloseOverlay *overlay, const struct timespec *now) {
   CloseOverlayBuffer *buffer;
   CloseOverlayRect *rect;
-  float color[4], progress, eased_progress, opacity;
-  sample_animation_timing(&overlay->start_time, now, &progress, &eased_progress);
-  opacity = fmaxf(0.0f, fminf(1.0f - eased_progress, 1.0f));
-  wl_list_for_each(buffer, &overlay->buffers, link)
-      wlr_scene_buffer_set_opacity(buffer->scene_buffer, buffer->opacity * opacity);
+  float color[4], opacity;
+  sample_animation_state(&overlay->anim, now, &overlay->geom, &opacity);
+  wlr_scene_node_set_position(&overlay->scene->node, overlay->geom.x, overlay->geom.y);
+  wl_list_for_each(buffer, &overlay->buffers, link) {
+    wlr_scene_node_set_position(&buffer->scene_buffer->node,
+                                SCALE_GEOM(buffer->geom.x, overlay->anim.start.width, overlay->geom.width),
+                                SCALE_GEOM(buffer->geom.y, overlay->anim.start.height, overlay->geom.height));
+    wlr_scene_buffer_set_dest_size(buffer->scene_buffer,
+                                   MAX(SCALE_GEOM(buffer->geom.width, overlay->anim.start.width, overlay->geom.width), 1),
+                                   MAX(SCALE_GEOM(buffer->geom.height, overlay->anim.start.height, overlay->geom.height), 1));
+    wlr_scene_buffer_set_opacity(buffer->scene_buffer, buffer->opacity * opacity);
+  }
   wl_list_for_each(rect, &overlay->rects, link) {
+    wlr_scene_node_set_position(&rect->scene_rect->node,
+                                SCALE_GEOM(rect->geom.x, overlay->anim.start.width, overlay->geom.width),
+                                SCALE_GEOM(rect->geom.y, overlay->anim.start.height, overlay->geom.height));
+    wlr_scene_rect_set_size(rect->scene_rect,
+                            MAX(SCALE_GEOM(rect->geom.width, overlay->anim.start.width, overlay->geom.width), 1),
+                            MAX(SCALE_GEOM(rect->geom.height, overlay->anim.start.height, overlay->geom.height), 1));
     scale_premultiplied_rgba(rect->color, opacity, color);
     wlr_scene_rect_set_color(rect->scene_rect, color);
   }
-  if (progress >= 1.0f) {
+  if (overlay->anim.progress >= 1.0f) {
     destroy_close_overlay(overlay);
     return 0;
   }
@@ -1980,7 +1994,6 @@ static void cleanupmon(struct wl_listener *listener, void *data) {
   Monitor *m = wl_container_of(listener, m, destroy);
   LayerSurface *l, *tmp;
   size_t i;
-
   DwlIpcOutput *ipc_output, *ipc_output_tmp;
   wl_list_for_each_safe(ipc_output, ipc_output_tmp, &m->dwl_ipc_outputs, link)
       wl_resource_destroy(ipc_output->resource);
@@ -2130,7 +2143,6 @@ static void createdecoration(struct wl_listener *listener, void *data) {
 static void createidleinhibitor(struct wl_listener *listener, void *data) {
   struct wlr_idle_inhibitor_v1 *idle_inhibitor = data;
   LISTEN_STATIC(&idle_inhibitor->events.destroy, destroyidleinhibitor);
-
   checkidleinhibitor(NULL);
 }
 
@@ -2753,8 +2765,7 @@ static void locksession(struct wl_listener *listener, void *data) {
 }
 
 static void mapnotify(struct wl_listener *listener, void *data) {
-  Client *p = NULL;
-  Client *w, *c = wl_container_of(listener, c, map);
+  Client *p = NULL, *w, *c = wl_container_of(listener, c, map);
   Monitor *m;
 
   c->scene = client_surface(c)->data = wlr_scene_tree_create(layers[LyrTile]);
@@ -3016,8 +3027,7 @@ static void rendermon(struct wl_listener *listener, void *data) {
   Client *c;
   struct wlr_output_state pending = {0};
   struct timespec now;
-  int i;
-  int needs_frame = 0;
+  int needs_frame = 0, i;
 
   clock_gettime(CLOCK_MONOTONIC, &now);
   wl_list_for_each(c, &clients, link) {
@@ -3929,14 +3939,12 @@ static void associatex11(struct wl_listener *listener, void *data) {
 static void configurex11(struct wl_listener *listener, void *data) {
   Client *c = wl_container_of(listener, c, configure);
   struct wlr_xwayland_surface_configure_event *event = data;
-  struct wlr_box geo = {
-      .x = event->x - (int)c->bw,
-      .y = event->y - (int)c->bw,
-      .width = event->width + 2 * c->bw,
-      .height = event->height + 2 * c->bw,
-  };
-
-  client_apply_x11_configure_request(c, event, &geo);
+  client_apply_x11_configure_request(c, event, &(struct wlr_box){
+                                                   .x = event->x - (int)c->bw,
+                                                   .y = event->y - (int)c->bw,
+                                                   .width = event->width + 2 * c->bw,
+                                                   .height = event->height + 2 * c->bw,
+                                               });
 }
 
 static void createnotifyx11(struct wl_listener *listener, void *data) {
