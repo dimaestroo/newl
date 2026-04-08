@@ -8,12 +8,16 @@
                             COLOR_COMPONENT(hex, 16) * COLOR_ALPHA(hex), \
                             COLOR_COMPONENT(hex, 8) * COLOR_ALPHA(hex),  \
                             COLOR_ALPHA(hex)}
-#define ANIMATION_DURATION 600.0f // Animation duration in milliseconds
-static const float layout_animation_scale = 0.6f; // Scale in & out client size in respect of the designated target
+/* animation duration in milliseconds */
+#define ANIMATION_DURATION 400.0f;
+/* scale in & out in respect of the designated target window geometry */
+static const float scale_in = 0.6f;
+static const float scale_out = 0.8f;
+/* cubic bezier settings */
 static struct BezierCurve bezier = {
     .control_points = {
-        {0.05f, 0.9f},
-        {0.1f, 1.05f}}};
+        {0.175f, 0.885f},
+        {0.32f, 1.075f}}};
 /* gaps */
 static int enablegaps = 1; /* enables gaps, used by togglegaps */
 static const unsigned int gaps = 10;

@@ -1377,7 +1377,7 @@ static void start_layout_animation(Client *c, Monitor *m, const struct wlr_box *
   if (c->initial_position) {
     c->anim.start = *target;
     if (!client_is_float_type(c))
-      scale_box_about_center(&c->anim.start, layout_animation_scale);
+      scale_box_about_center(&c->anim.start, scale_in);
     else
       apply_initial_box_offset(&c->anim.start, 0, 1);
     c->opacity = 0.0f;
@@ -1510,7 +1510,7 @@ static void transfer_client_borders_to_close_overlay(CloseOverlay *overlay, Clie
 
 static void activate_close_overlay(CloseOverlay *overlay) {
   overlay->anim.target = overlay->geom;
-  scale_box_about_center(&overlay->anim.target, layout_animation_scale);
+  scale_box_about_center(&overlay->anim.target, scale_out);
   start_animation(&overlay->anim, &overlay->geom, 1.0f,
                   &overlay->anim.target, NULL, 0.0f, NULL);
   wl_list_insert(close_overlays.prev, &overlay->link);
