@@ -122,23 +122,16 @@ typedef union {
 } Arg;
 
 typedef struct {
-  unsigned int mod;
-  unsigned int button;
+  unsigned int mod, button;
   void (*func)(const Arg *);
   const Arg arg;
 } Button;
 typedef struct Monitor Monitor;
 typedef struct {
-  struct wlr_box start;
-  struct wlr_box target;
-  struct wlr_box projected;
+  struct wlr_box start, target, projected;
   struct timespec start_time;
-  float start_opacity;
-  float target_opacity;
-  float progress;
-  float eased_progress;
-  bool active;
-  bool grow;
+  float start_opacity, target_opacity, progress, eased_progress;
+  bool active, grow;
 } Animation;
 typedef struct {
   unsigned int type;
@@ -147,28 +140,16 @@ typedef struct {
   struct wlr_scene_rect *border[4];
   struct wlr_scene_tree *scene_surface;
   struct wl_list link;
-  struct wlr_box geom;
-  struct wlr_box prev;
+  struct wlr_box geom, prev;
   union {
     struct wlr_xdg_surface *xdg;
     struct wlr_xwayland_surface *xwayland;
   } surface;
   struct wlr_xdg_toplevel_decoration_v1 *decoration;
-  struct wl_listener commit;
-  struct wl_listener map;
-  struct wl_listener maximize;
-  struct wl_listener unmap;
-  struct wl_listener destroy;
-  struct wl_listener set_title;
-  struct wl_listener fullscreen;
-  struct wl_listener set_decoration_mode;
-  struct wl_listener destroy_decoration;
+  struct wl_listener commit, map, maximize, unmap, destroy, set_title, fullscreen,
+      set_decoration_mode, destroy_decoration;
 #ifdef XWAYLAND
-  struct wl_listener activate;
-  struct wl_listener associate;
-  struct wl_listener dissociate;
-  struct wl_listener configure;
-  struct wl_listener set_hints;
+  struct wl_listener activate, associate, dissociate, configure, set_hints;
 #endif
   unsigned int bw;
   uint32_t tags;
@@ -176,8 +157,7 @@ typedef struct {
   Animation anim;
   float opacity;
   struct wlr_box restore_geom;
-  bool is_tag_switch_anim;
-  bool hide_on_anim_end;
+  bool is_tag_switch_anim, hide_on_anim_end;
   unsigned int initial_position;
 } Client;
 typedef struct {
@@ -196,8 +176,7 @@ typedef struct {
   struct wl_list link;
   Monitor *mon;
   struct wlr_scene_tree *scene;
-  struct wl_list buffers;
-  struct wl_list rects;
+  struct wl_list buffers, rects;
   Animation anim;
   struct wlr_box geom;
 } CloseOverlay;
@@ -222,15 +201,12 @@ typedef struct {
   const xkb_keysym_t *keysyms;
   uint32_t mods;
   struct wl_event_source *key_repeat_source;
-  struct wl_listener modifiers;
-  struct wl_listener key;
-  struct wl_listener destroy;
+  struct wl_listener modifiers, key, destroy;
 } KeyboardGroup;
 typedef struct {
   unsigned int type;
   Monitor *mon;
-  struct wlr_scene_tree *scene;
-  struct wlr_scene_tree *popups;
+  struct wlr_scene_tree *scene, *popups;
   struct wlr_scene_layer_surface_v1 *scene_layer;
   struct wl_list link;
   int mapped;
@@ -240,48 +216,34 @@ typedef struct {
   bool being_unmapped;
   unsigned int initial_position;
   struct wlr_layer_surface_v1 *layer_surface;
-  struct wl_listener destroy;
-  struct wl_listener unmap;
-  struct wl_listener surface_commit;
+  struct wl_listener destroy, unmap, surface_commit;
 } LayerSurface;
 typedef struct {
   const char *symbol;
   void (*arrange)(Monitor *);
 } Layout;
 struct Monitor {
-  struct wl_list link;
-  struct wl_list dwl_ipc_outputs;
+  struct wl_list link, dwl_ipc_outputs;
   struct wlr_output *wlr_output;
   struct wlr_scene_output *scene_output;
-  struct wl_listener frame;
-  struct wl_listener destroy;
-  struct wl_listener request_state;
-  struct wl_listener destroy_lock_surface;
+  struct wl_listener frame, destroy, request_state, destroy_lock_surface;
   struct wlr_session_lock_surface_v1 *lock_surface;
-  struct wlr_box m;
-  struct wlr_box w;
+  struct wlr_box m, w;
   struct wl_list layers[4];
   const Layout *lt[2];
-  unsigned int seltags;
-  unsigned int sellt;
-  uint32_t tagset[2];
-  uint32_t prevtagset;
-  int curtag;
-  int switch_offset;
+  unsigned int seltags, sellt;
+  uint32_t tagset[2], prevtagset;
+  int curtag, switch_offset;
   struct timespec switch_start_time;
   float mfact;
   int gamma_lut_changed;
   char ltsymbol[16];
-  int asleep;
-  int switch_animate;
-  int switch_dir;
-  int gaps;
+  int asleep, switch_animate, switch_dir, gaps;
   Client **focus_anchors;
 };
 typedef struct {
   const char *name;
-  float mfact;
-  float scale;
+  float mfact, scale;
   const Layout *lt;
   enum wl_output_transform rr;
   int x, y;
@@ -291,26 +253,20 @@ typedef struct {
   struct wl_listener destroy;
 } PointerConstraint;
 typedef struct {
-  const char *id;
-  const char *title;
+  const char *id, *title;
   uint32_t tags;
-  int isfloating;
-  int monitor;
+  int isfloating, monitor;
 } Rule;
 typedef struct {
   struct wlr_scene_tree *scene;
   struct wlr_session_lock_v1 *lock;
-  struct wl_listener new_surface;
-  struct wl_listener unlock;
-  struct wl_listener destroy;
+  struct wl_listener new_surface, unlock, destroy;
 } SessionLock;
 struct Vec2 {
-  float x;
-  float y;
+  float x, y;
 };
 struct BezierCurve {
-  struct Vec2 control_points[2];
-  struct Vec2 baked_points[BAKED_POINTS];
+  struct Vec2 control_points[2], baked_points[BAKED_POINTS];
 };
 static void chvt(const Arg *arg);
 static void focusmon(const Arg *arg);
@@ -422,8 +378,7 @@ static void dissociatex11(struct wl_listener *listener, void *data);
 static void sethints(struct wl_listener *listener, void *data);
 static void xwaylandready(struct wl_listener *listener, void *data);
 #endif
-static pid_t child_pid = -1;
-static pid_t *autostart_pids;
+static pid_t child_pid = -1, *autostart_pids;
 static size_t autostart_len;
 static int locked;
 static void *exclusive_focus;
@@ -431,11 +386,9 @@ static struct wl_display *dpy;
 static struct wl_event_loop *event_loop;
 static struct wlr_backend *backend;
 static struct wlr_scene *scene;
-static struct wlr_scene_tree *layers[NUM_LAYERS];
-static struct wlr_scene_tree *drag_icon;
+static struct wlr_scene_tree *layers[NUM_LAYERS], *drag_icon;
 static const int layermap[] = {LyrBg, LyrBottom, LyrTop, LyrOverlay};
-static float bezier_peak_y = 1.0f;
-static float bezier_peak_x = 1.0f;
+static float bezier_peak_y = 1.0f, bezier_peak_x = 1.0f;
 static struct wlr_renderer *drw;
 static struct wlr_allocator *alloc;
 static struct wlr_compositor *compositor;
@@ -443,8 +396,7 @@ static struct wlr_session *session;
 static struct wlr_xdg_shell *xdg_shell;
 static struct wlr_xdg_activation_v1 *activation;
 static struct wlr_xdg_decoration_manager_v1 *xdg_decoration_mgr;
-static struct wl_list clients;
-static struct wl_list close_overlays;
+static struct wl_list clients, close_overlays;
 static struct wlr_idle_notifier_v1 *idle_notifier;
 static struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
 static struct wlr_layer_shell_v1 *layer_shell;
@@ -471,42 +423,42 @@ static struct wlr_output_layout *output_layout;
 static struct wlr_box sgeom;
 static struct wl_list mons;
 static Monitor *selmon;
-static struct wl_listener swipebegin = {.notify = swipe_begin};
-static struct wl_listener swipeupdate = {.notify = swipe_update};
-static struct wl_listener swipeend = {.notify = swipe_end};
-static struct wl_listener pinchbegin = {.notify = pinch_begin};
-static struct wl_listener pinchupdate = {.notify = pinch_update};
-static struct wl_listener pinchend = {.notify = pinch_end};
-static struct wl_listener holdbegin = {.notify = hold_begin};
-static struct wl_listener holdend = {.notify = hold_end};
-static struct wl_listener cursor_axis = {.notify = axisnotify};
-static struct wl_listener cursor_button = {.notify = buttonpress};
-static struct wl_listener cursor_frame = {.notify = cursorframe};
-static struct wl_listener cursor_motion = {.notify = motionrelative};
-static struct wl_listener cursor_motion_absolute = {.notify = motionabsolute};
-static struct wl_listener gpu_reset = {.notify = gpureset};
-static struct wl_listener layout_change = {.notify = updatemons};
-static struct wl_listener new_idle_inhibitor = {.notify = createidleinhibitor};
-static struct wl_listener new_input_device = {.notify = inputdevice};
-static struct wl_listener new_virtual_keyboard = {.notify = virtualkeyboard};
-static struct wl_listener new_virtual_pointer = {.notify = virtualpointer};
-static struct wl_listener new_pointer_constraint = {.notify = createpointerconstraint};
-static struct wl_listener new_output = {.notify = createmon};
-static struct wl_listener new_xdg_toplevel = {.notify = createnotify};
-static struct wl_listener new_xdg_popup = {.notify = createpopup};
-static struct wl_listener new_xdg_decoration = {.notify = createdecoration};
-static struct wl_listener new_layer_surface = {.notify = createlayersurface};
-static struct wl_listener output_mgr_apply = {.notify = outputmgrapply};
-static struct wl_listener output_mgr_test = {.notify = outputmgrtest};
-static struct wl_listener output_power_mgr_set_mode = {.notify = powermgrsetmode};
-static struct wl_listener request_activate = {.notify = urgent};
-static struct wl_listener request_cursor = {.notify = setcursor};
-static struct wl_listener request_set_psel = {.notify = setpsel};
-static struct wl_listener request_set_sel = {.notify = setsel};
-static struct wl_listener request_set_cursor_shape = {.notify = setcursorshape};
-static struct wl_listener request_start_drag = {.notify = requeststartdrag};
-static struct wl_listener start_drag = {.notify = startdrag};
-static struct wl_listener new_session_lock = {.notify = locksession};
+static struct wl_listener swipebegin = {.notify = swipe_begin},
+                          swipeupdate = {.notify = swipe_update},
+                          swipeend = {.notify = swipe_end},
+                          pinchbegin = {.notify = pinch_begin},
+                          pinchupdate = {.notify = pinch_update},
+                          pinchend = {.notify = pinch_end},
+                          holdbegin = {.notify = hold_begin},
+                          holdend = {.notify = hold_end},
+                          cursor_axis = {.notify = axisnotify},
+                          cursor_button = {.notify = buttonpress},
+                          cursor_frame = {.notify = cursorframe},
+                          cursor_motion = {.notify = motionrelative},
+                          cursor_motion_absolute = {.notify = motionabsolute},
+                          gpu_reset = {.notify = gpureset},
+                          layout_change = {.notify = updatemons},
+                          new_idle_inhibitor = {.notify = createidleinhibitor},
+                          new_input_device = {.notify = inputdevice},
+                          new_virtual_keyboard = {.notify = virtualkeyboard},
+                          new_virtual_pointer = {.notify = virtualpointer},
+                          new_pointer_constraint = {.notify = createpointerconstraint},
+                          new_output = {.notify = createmon},
+                          new_xdg_toplevel = {.notify = createnotify},
+                          new_xdg_popup = {.notify = createpopup},
+                          new_xdg_decoration = {.notify = createdecoration},
+                          new_layer_surface = {.notify = createlayersurface},
+                          output_mgr_apply = {.notify = outputmgrapply},
+                          output_mgr_test = {.notify = outputmgrtest},
+                          output_power_mgr_set_mode = {.notify = powermgrsetmode},
+                          request_activate = {.notify = urgent},
+                          request_cursor = {.notify = setcursor},
+                          request_set_psel = {.notify = setpsel},
+                          request_set_sel = {.notify = setsel},
+                          request_set_cursor_shape = {.notify = setcursorshape},
+                          request_start_drag = {.notify = requeststartdrag},
+                          start_drag = {.notify = startdrag},
+                          new_session_lock = {.notify = locksession};
 static struct zdwl_ipc_manager_v2_interface dwl_manager_implementation = {.release = dwl_ipc_manager_release, .get_output = dwl_ipc_manager_get_output};
 static struct zdwl_ipc_output_v2_interface dwl_output_implementation = {.release = dwl_ipc_output_release, .set_tags = dwl_ipc_output_set_tags, .set_layout = dwl_ipc_output_set_layout, .set_client_tags = dwl_ipc_output_set_client_tags};
 #ifdef XWAYLAND
@@ -517,8 +469,8 @@ static void createnotifyx11(struct wl_listener *listener, void *data);
 static void dissociatex11(struct wl_listener *listener, void *data);
 static void sethints(struct wl_listener *listener, void *data);
 static void xwaylandready(struct wl_listener *listener, void *data);
-static struct wl_listener new_xwayland_surface = {.notify = createnotifyx11};
-static struct wl_listener xwayland_ready = {.notify = xwaylandready};
+static struct wl_listener new_xwayland_surface = {.notify = createnotifyx11},
+                          xwayland_ready = {.notify = xwaylandready};
 static struct wlr_xwayland *xwayland;
 #endif
 #include "config.h"
@@ -965,21 +917,13 @@ static void togglebar(const Arg *arg) {
 }
 
 static float get_x_for_t(const struct BezierCurve *curve, float t) {
-  float t2 = t * t;
-  float t3 = t2 * t;
-  float mt = 1 - t;
-  float mt2 = mt * mt;
-
+  float t2 = t * t, t3 = t2 * t, mt = 1 - t, mt2 = mt * mt;
   return 3 * t * mt2 * curve->control_points[0].x +
          3 * t2 * mt * curve->control_points[1].x + t3;
 }
 
 static float get_y_for_t(const struct BezierCurve *curve, float t) {
-  float t2 = t * t;
-  float t3 = t2 * t;
-  float mt = 1 - t;
-  float mt2 = mt * mt;
-
+  float t2 = t * t, t3 = t2 * t, mt = 1 - t, mt2 = mt * mt;
   return 3 * t * mt2 * curve->control_points[0].y +
          3 * t2 * mt * curve->control_points[1].y + t3;
 }
@@ -1255,8 +1199,7 @@ static void start_client_animation(Client *c, const struct wlr_box *target, cons
 }
 
 static void apply_initial_box_offset(struct wlr_box *box, int dir_x, int dir_y) {
-  int offset_x = MAX(box->width / 5, 24);
-  int offset_y = MAX(box->height / 3, 24);
+  int offset_x = MAX(box->width / 5, 24), offset_y = MAX(box->height / 3, 24);
 
   box->x += dir_x * offset_x;
   box->y += dir_y * offset_y;
@@ -2254,8 +2197,7 @@ static void cursorframe(struct wl_listener *listener, void *data) {
 
 static void cursorwarptohint(void) {
   Client *c = NULL;
-  double sx = active_constraint->current.cursor_hint.x;
-  double sy = active_constraint->current.cursor_hint.y;
+  double sx = active_constraint->current.cursor_hint.x, sy = active_constraint->current.cursor_hint.y;
 
   toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
   if (c && active_constraint->current.cursor_hint.enabled) {
