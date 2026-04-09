@@ -27,7 +27,7 @@ static const int bypass_surface_visibility = 0; /* 1 means idle inhibitors will 
 static const unsigned int borderpx = 2;         /* border pixel of windows */
 static const float bordercolor[] = PREMULT_COLOR(0x99999980);
 static const float focuscolor[] = PREMULT_COLOR(0xb4befeff);
-static const float urgentcolor[] = PREMULT_COLOR(0xb4befeff);
+static const float urgentcolor[] = PREMULT_COLOR(0xff0000ff);
 #define TAGCOUNT (9)
 
 static int log_level = WLR_ERROR;
