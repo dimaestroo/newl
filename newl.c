@@ -518,9 +518,9 @@ static inline int client_is_x11(Client *c) {
 
 static Client *focus_fallback_from(Client *anchor, Monitor *m) {
   Client *c;
-  struct wl_list *l;
-  for (l = anchor->link.prev; l != &clients; l = l->prev) {
-    c = wl_container_of(l, c, link);
+  wl_list_for_each_reverse(c, &anchor->link, link) {
+    if (&c->link == &clients)
+      continue;
     if (VISIBLEON(c, m))
       return c;
   }
@@ -2421,13 +2421,8 @@ static void focusstack(const Arg *arg) {
 }
 
 static Client *focustop(Monitor *m) {
-  Client *c;
-  if (m && m->focus_anchors && (c = m->focus_anchors[m->curtag]) && VISIBLEON(c, m))
-    return c;
-  wl_list_for_each_reverse(c, &clients, link) {
-    if (VISIBLEON(c, m))
-      return c;
-  }
+  if (m && m->focus_anchors && m->focus_anchors[m->curtag] && VISIBLEON(m->focus_anchors[m->curtag], m))
+    return m->focus_anchors[m->curtag];
   return NULL;
 }
 
