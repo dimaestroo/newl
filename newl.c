@@ -564,12 +564,12 @@ static inline int client_is_x11(Client *c) {
   return 0;
 }
 
-static Client *focus_fallback_from(Client *anchor, Monitor *m, uint32_t tags) {
+static Client *focus_fallback_from(Client *anchor, Monitor *m) {
   Client *c;
   struct wl_list *l;
   for (l = anchor->link.prev; l != &clients; l = l->prev) {
     c = wl_container_of(l, c, link);
-    if (VISIBLEONTAGS(c, m, tags))
+    if (VISIBLEON(c, m))
       return c;
   }
   return NULL;
@@ -3614,7 +3614,7 @@ static void unmapnotify(struct wl_listener *listener, void *data) {
     if (c->scene)
       create_client_close_overlay(c, &c->geom);
     c->anim.active = 0;
-    c->mon->focus_anchors[c->mon->curtag] = focus_fallback_from(c, c->mon, 1u << c->mon->curtag);
+    c->mon->focus_anchors[c->mon->curtag] = focus_fallback_from(c, c->mon);
     wl_list_remove(&c->link);
     setmon(c, NULL, 0);
   }
