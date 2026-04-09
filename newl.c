@@ -955,23 +955,17 @@ static float get_y_for_point(const struct BezierCurve *curve, float x) {
   return lower_point->y + (upper_point->y - lower_point->y) * perc_in_delta;
 }
 
-static void sample_animation_timing(const struct timespec *start_time, const struct timespec *now,
-                                    float *progress, float *eased_progress) {
-  *progress = ((now->tv_sec - start_time->tv_sec) * 1000 +
-               (now->tv_nsec - start_time->tv_nsec) / 1000000) /
-              ANIMATION_DURATION;
-  *eased_progress = get_y_for_point(&bezier, *progress);
-}
-
-static void sample_animation_state(Animation *anim, const struct timespec *now,
+static void sample_animation(Animation *anim, const struct timespec *now,
                                    struct wlr_box *geom, float *opacity) {
   struct timespec local_now;
   if (!now) {
     clock_gettime(CLOCK_MONOTONIC, &local_now);
     now = &local_now;
   }
-  sample_animation_timing(&anim->start_time, now, &anim->progress,
-                          &anim->eased_progress);
+  anim->progress = ((now->tv_sec - anim->start_time.tv_sec) * 1000 +
+                    (now->tv_nsec - anim->start_time.tv_nsec) / 1000000) /
+                   ANIMATION_DURATION;
+  anim->eased_progress = get_y_for_point(&bezier, anim->progress);
   geom->x = (int)(anim->start.x + (anim->target.x - anim->start.x) * anim->eased_progress);
   geom->y = (int)(anim->start.y + (anim->target.y - anim->start.y) * anim->eased_progress);
   geom->width = (int)(anim->start.width + (anim->target.width - anim->start.width) * anim->eased_progress);
@@ -1050,7 +1044,7 @@ static void start_animation(Animation *anim, const struct wlr_box *geom, float o
                             const struct wlr_box *target, const struct wlr_box *start,
                             float target_opacity, const struct timespec *start_time) {
   if (!start && anim->active)
-    sample_animation_state(anim, NULL, &anim->start, &anim->start_opacity);
+    sample_animation(anim, NULL, &anim->start, &anim->start_opacity);
   else {
     if (!start)
       anim->start = *geom;
@@ -1416,7 +1410,7 @@ static void cancel_tag_switch_exit_animations(Monitor *m) {
 }
 
 static int step_client_animation_frame(Client *c, const struct timespec *now) {
-  sample_animation_state(&c->anim, now, &c->geom, &c->opacity);
+  sample_animation(&c->anim, now, &c->geom, &c->opacity);
   if ((c->anim.grow && c->anim.progress >= bezier_peak_x) || !c->anim.grow)
     client_request_surface_size(c, &c->geom);
   client_apply_visual_geometry(c, &c->geom);
@@ -1438,7 +1432,7 @@ static int step_client_animation_frame(Client *c, const struct timespec *now) {
 }
 
 static int step_layer_surface_animation_frame(LayerSurface *l, const struct timespec *now) {
-  sample_animation_state(&l->anim, now, &l->geom, &l->opacity);
+  sample_animation(&l->anim, now, &l->geom, &l->opacity);
   layer_surface_apply_visual_geometry(l, &l->geom);
   wlr_scene_node_for_each_buffer(&l->scene->node, set_scene_buffer_opacity,
                                  &l->opacity);
@@ -1455,7 +1449,7 @@ static int step_close_overlay_frame(CloseOverlay *overlay, const struct timespec
   CloseOverlayBuffer *buffer;
   CloseOverlayRect *rect;
   float color[4], opacity;
-  sample_animation_state(&overlay->anim, now, &overlay->geom, &opacity);
+  sample_animation(&overlay->anim, now, &overlay->geom, &opacity);
   wlr_scene_node_set_position(&overlay->scene->node, overlay->geom.x, overlay->geom.y);
   wl_list_for_each(buffer, &overlay->buffers, link) {
     wlr_scene_node_set_position(&buffer->scene_buffer->node,
