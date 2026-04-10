@@ -626,6 +626,47 @@ static inline struct wlr_box monitor_get_single_client_box(Monitor *m) {
       .height = m->w.height - 2 * m->gaps * enablegaps,
   };
 }
+static inline int monitor_count_tiled_clients(Monitor *m) {
+  Client *c;
+  int n = 0;
+  wl_list_for_each(c, &clients, link) {
+    if (VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen)
+      n++;
+  }
+  return n;
+}
+
+static inline struct wlr_box monitor_get_tile_client_box(Monitor *m, int index, int count) {
+  int i, mw, sy, rh, rw, sh;
+  if (count <= 1)
+    return monitor_get_single_client_box(m);
+  if (index == 0) {
+    return (struct wlr_box){
+        .x = m->w.x + m->gaps * enablegaps,
+        .y = m->w.y + m->gaps * enablegaps,
+        .width = (int)((m->w.width - m->gaps * enablegaps) * m->mfact) -
+                 m->gaps * enablegaps,
+        .height = m->w.height - 2 * m->gaps * enablegaps,
+    };
+  }
+  mw = (int)((m->w.width - m->gaps * enablegaps) * m->mfact);
+  sy = m->w.y + m->gaps * enablegaps;
+  for (i = 1; i < index; i++) {
+    rh = m->w.height - (sy - m->w.y) - m->gaps * enablegaps;
+    rw = (int)(count - i);
+    sh = (rh - (rw - 1) * m->gaps * enablegaps) / rw;
+    sy += sh + m->gaps * enablegaps;
+  }
+  rh = m->w.height - (sy - m->w.y) - m->gaps * enablegaps;
+  rw = (int)(count - index);
+  sh = (rh - (rw - 1) * m->gaps * enablegaps) / rw;
+  return (struct wlr_box){
+      .x = m->w.x + mw + m->gaps * enablegaps,
+      .y = sy,
+      .width = m->w.width - mw - 2 * m->gaps * enablegaps,
+      .height = sh,
+  };
+}
 
 static inline void client_get_clip(Client *c, struct wlr_box *clip, const struct wlr_box *geom) {
   *clip = (struct wlr_box){
@@ -1199,6 +1240,27 @@ static void scale_box_about_center(struct wlr_box *box, float scale) {
   box->height = (int)(box->height * scale);
   box->x += (width - box->width) / 2;
   box->y += (height - box->height) / 2;
+}
+
+static int client_prepare_initial_layout(Client *c) {
+  int i;
+
+  if (!c->initial_position || !c->mon || !(c->tags & c->mon->tagset[c->mon->seltags]) || client_get_parent(c))
+    return 0;
+
+  if (client_wants_fullscreen(c))
+    c->anim.target = c->mon->m;
+  else if (c->isfloating)
+    return 0;
+  else if (!c->mon->lt[c->mon->sellt]->arrange)
+    c->anim.target = monitor_get_single_client_box(c->mon);
+  else if (c->mon->lt[c->mon->sellt]->arrange == tile) {
+    i = monitor_count_tiled_clients(c->mon) + 1;
+    c->anim.target = monitor_get_tile_client_box(c->mon, i - 1, i);
+  } else
+    return 0;
+
+  return 1;
 }
 
 static void start_layout_animation(Client *c, Monitor *m, const struct wlr_box *target) {
@@ -1884,7 +1946,8 @@ static void commitnotify(struct wl_listener *listener, void *data) {
     applyrules(c);
     if (c->mon) {
       client_set_scale(client_surface(c), c->mon->wlr_output->scale);
-      client_request_surface_size(c, &c->mon->m);
+      if (client_prepare_initial_layout(c))
+        client_request_surface_size(c, &c->anim.target);
     }
     setmon(c, NULL, 0);
     wlr_xdg_toplevel_set_wm_capabilities(c->surface.xdg->toplevel,
@@ -3409,42 +3472,18 @@ static void tagmon(const Arg *arg) {
 }
 
 static void tile(Monitor *m) {
-  unsigned int i = 0, n = 0, mw, my, sy, rh, rw, sh;
+  int i = 0, n;
   Client *c;
   struct wlr_box target;
 
-  wl_list_for_each(c, &clients, link) if (VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen)
-      n++;
-
+  n = monitor_count_tiled_clients(m);
   if (!n)
     return;
-  mw = (int)((m->w.width - m->gaps * enablegaps) * m->mfact);
-  my = sy = m->w.y + m->gaps * enablegaps;
 
   wl_list_for_each(c, &clients, link) {
     if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
       continue;
-    if (n == 1) {
-      target = monitor_get_single_client_box(m);
-    } else if (i == 0) {
-      target = (struct wlr_box){
-          .x = m->w.x + m->gaps * enablegaps,
-          .y = my,
-          .width = mw - m->gaps * enablegaps,
-          .height = m->w.height - 2 * m->gaps * enablegaps};
-    } else {
-      rh = m->w.height - (sy - m->w.y) - m->gaps * enablegaps;
-      rw = n - i;
-      sh = (rh - (rw - 1) * m->gaps * enablegaps) / rw;
-
-      target = (struct wlr_box){
-          .x = m->w.x + mw + m->gaps * enablegaps,
-          .y = sy,
-          .width = m->w.width - mw - 2 * m->gaps * enablegaps,
-          .height = sh};
-
-      sy += sh + m->gaps * enablegaps;
-    }
+    target = monitor_get_tile_client_box(m, i, n);
     start_layout_animation(c, m, &target);
     i++;
   }
