@@ -1814,7 +1814,6 @@ static void cleanup(void) {
 }
 
 static void cleanupmon(struct wl_listener *listener, void *data) {
-  CloseOverlay *overlay, *overlay_tmp;
   Monitor *m = wl_container_of(listener, m, destroy);
   LayerSurface *l, *tmp;
   size_t i;
@@ -1825,10 +1824,6 @@ static void cleanupmon(struct wl_listener *listener, void *data) {
   for (i = 0; i < LENGTH(m->layers); i++) {
     wl_list_for_each_safe(l, tmp, &m->layers[i], link)
         wlr_layer_surface_v1_destroy(l->layer_surface);
-  }
-  wl_list_for_each_safe(overlay, overlay_tmp, &close_overlays, link) {
-    if (overlay->mon == m)
-      destroy_close_overlay(overlay);
   }
 
   wl_list_remove(&m->destroy.link);
