@@ -674,8 +674,7 @@ static inline Client *client_get_parent(Client *c) {
   return p;
 }
 
-static inline int
-client_has_children(Client *c) {
+static inline int client_has_children(Client *c) {
 #ifdef XWAYLAND
   if (client_is_x11(c))
     return !wl_list_empty(&c->surface.xwayland->children);
@@ -727,8 +726,7 @@ static inline int client_is_float_type(Client *c) {
   return client_is_dialog_type(c) || (state.min_width != 0 && state.min_height != 0 && (state.min_width == state.max_width || state.min_height == state.max_height));
 }
 
-static inline int
-client_is_unmanaged(Client *c) {
+static inline int client_is_unmanaged(Client *c) {
 #ifdef XWAYLAND
   if (client_is_x11(c))
     return c->surface.xwayland->override_redirect;
@@ -956,7 +954,7 @@ static float get_y_for_point(const struct BezierCurve *curve, float x) {
 }
 
 static void sample_animation(Animation *anim, const struct timespec *now,
-                                   struct wlr_box *geom, float *opacity) {
+                             struct wlr_box *geom, float *opacity) {
   struct timespec local_now;
   if (!now) {
     clock_gettime(CLOCK_MONOTONIC, &local_now);
@@ -991,7 +989,6 @@ static void get_client_settled_geometry(Client *c, struct wlr_box *geom) {
 
 static int get_monitor_switch_offset(Monitor *m, uint32_t tags) {
   Client *c;
-  struct wlr_box settled_geom;
   int offset_sum = 0, samples = 0;
 
   wl_list_for_each(c, &clients, link) {
@@ -1000,8 +997,8 @@ static int get_monitor_switch_offset(Monitor *m, uint32_t tags) {
     if (!c->is_tag_switch_anim || !c->anim.active || c->hide_on_anim_end)
       continue;
 
-    get_client_settled_geometry(c, &settled_geom);
-    offset_sum += c->geom.x - settled_geom.x;
+    get_client_settled_geometry(c, &c->anim.target);
+    offset_sum += c->geom.x - c->anim.target.x;
     samples++;
   }
 
@@ -1138,9 +1135,6 @@ static int client_map_unmanaged(Client *c) {
 
 static void client_request_surface_size(Client *c, const struct wlr_box *geo) {
   uint32_t width, height;
-  if (!c->mon || !c->scene || !client_surface(c)->mapped)
-    return;
-
   width = MAX(c->anim.active ? MAX(geo->width, c->anim.target.width) : geo->width, 1 + 2 * (int)c->bw) - 2 * c->bw;
   height = MAX(c->anim.active ? MAX(geo->height, c->anim.target.height) : geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw;
 
@@ -1208,8 +1202,6 @@ static void scale_box_about_center(struct wlr_box *box, float scale) {
 }
 
 static void start_layout_animation(Client *c, Monitor *m, const struct wlr_box *target) {
-  const struct wlr_box *start = NULL;
-
   if (c->initial_position) {
     c->anim.start = *target;
     if (!client_is_float_type(c))
@@ -1217,36 +1209,29 @@ static void start_layout_animation(Client *c, Monitor *m, const struct wlr_box *
     else
       apply_initial_box_offset(&c->anim.start, 0, 1);
     c->opacity = 0.0f;
-    c->initial_position = 0;
-    start = &c->anim.start;
   }
-
   if (m->switch_animate && !VISIBLEONTAGS(c, m, m->prevtagset)) {
     c->anim.start = *target;
     c->anim.start.x += m->switch_dir * m->m.width + m->switch_offset;
     c->hide_on_anim_end = 0;
     c->is_tag_switch_anim = 1;
-    start = &c->anim.start;
   } else
     c->is_tag_switch_anim = 0;
-  start_client_animation(c, target, start, 1.0f,
-                         c->is_tag_switch_anim ? &m->switch_start_time : NULL);
+  start_client_animation(c, target, c->initial_position || c->is_tag_switch_anim ? &c->anim.start : NULL, 1.0f, c->is_tag_switch_anim ? &m->switch_start_time : NULL);
+  c->initial_position = 0;
 }
 
 static void start_tag_switch_exit_animation(Client *c, Monitor *m) {
-  struct wlr_box target;
-  get_client_settled_geometry(c, &target);
-  c->restore_geom = target;
+  get_client_settled_geometry(c, &c->anim.target);
+  c->restore_geom = c->anim.target;
   c->hide_on_anim_end = 1;
   c->is_tag_switch_anim = 1;
-
-  target.x -= m->switch_dir * m->m.width;
-  start_client_animation(c, &target, &c->geom, c->opacity, &m->switch_start_time);
+  c->anim.target.x -= m->switch_dir * m->m.width;
+  start_client_animation(c, &c->anim.target, &c->geom, c->opacity, &m->switch_start_time);
 }
 
 static void start_layer_surface_animation(LayerSurface *l, const struct wlr_box *target) {
   const struct wlr_box *start = NULL;
-
   if (l->initial_position) {
     uint32_t anchor = l->layer_surface->current.anchor;
     int dir_x = !!(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT) -
@@ -1522,7 +1507,6 @@ static void applyrules(Client *c) {
 
 static void arrange(Monitor *m) {
   Client *c;
-  struct wlr_box target;
   int arranged, should_show;
 
   if (!m->wlr_output->enabled)
@@ -1551,10 +1535,7 @@ static void arrange(Monitor *m) {
   wl_list_for_each(c, &clients, link) {
     if (c->mon != m || c->scene->node.parent == layers[LyrFS])
       continue;
-
-    wlr_scene_node_reparent(&c->scene->node,
-                            c->isfloating ? layers[arranged ? LyrFloat : LyrTile]
-                                          : c->scene->node.parent);
+    wlr_scene_node_reparent(&c->scene->node, c->isfloating ? layers[arranged ? LyrFloat : LyrTile] : c->scene->node.parent);
   }
 
   if (arranged)
@@ -1566,10 +1547,9 @@ static void arrange(Monitor *m) {
     if (arranged && !c->isfloating && !c->isfullscreen)
       continue;
 
-    target = c->isfullscreen               ? m->m
-             : !arranged && !c->isfloating ? monitor_get_single_client_box(m)
-                                           : c->geom;
-    start_layout_animation(c, m, &target);
+    c->anim.target = c->isfullscreen ? m->m : !arranged && !c->isfloating ? monitor_get_single_client_box(m)
+                                                                          : c->geom;
+    start_layout_animation(c, m, &c->anim.target);
   }
   motionnotify(0, NULL, 0, 0, 0, 0);
   checkidleinhibitor(NULL);
@@ -1611,7 +1591,6 @@ static void pushfirstbottom(const Arg *arg) {
 
 static void arrangelayer(Monitor *m, struct wl_list *list, struct wlr_box *usable_area, int exclusive) {
   LayerSurface *l;
-  struct wlr_box full_area = m->m, target;
   wl_list_for_each(l, list, link) {
     struct wlr_layer_surface_v1 *layer_surface = l->layer_surface;
 
@@ -1623,18 +1602,18 @@ static void arrangelayer(Monitor *m, struct wl_list *list, struct wlr_box *usabl
     if (exclusive != (layer_surface->current.exclusive_zone > 0))
       continue;
 
-    wlr_scene_layer_surface_v1_configure(l->scene_layer, &full_area, usable_area);
-    target = (struct wlr_box){
+    wlr_scene_layer_surface_v1_configure(l->scene_layer, &m->m, usable_area);
+    l->anim.target = (struct wlr_box){
         .x = l->scene->node.x,
         .y = l->scene->node.y,
         .width = MAX((int)l->layer_surface->current.actual_width, 1),
         .height = MAX((int)l->layer_surface->current.actual_height, 1),
     };
     if (!l->mapped) {
-      layer_surface_apply_visual_geometry(l, &target);
+      layer_surface_apply_visual_geometry(l, &l->anim.target);
       continue;
     }
-    start_layer_surface_animation(l, &target);
+    start_layer_surface_animation(l, &l->anim.target);
   }
 }
 
@@ -1651,7 +1630,6 @@ static void arrangelayers(Monitor *m) {
 
   for (i = 3; i >= 0; i--)
     arrangelayer(m, &m->layers[i], &usable_area, 1);
-
   if (!wlr_box_equal(&usable_area, &m->w)) {
     m->w = usable_area;
     arrange(m);
@@ -1904,8 +1882,10 @@ static void commitnotify(struct wl_listener *listener, void *data) {
 #endif
   if (c->surface.xdg->initial_commit) {
     applyrules(c);
-    if (c->mon)
+    if (c->mon) {
       client_set_scale(client_surface(c), c->mon->wlr_output->scale);
+      client_request_surface_size(c, &c->mon->m);
+    }
     setmon(c, NULL, 0);
     wlr_xdg_toplevel_set_wm_capabilities(c->surface.xdg->toplevel,
                                          WLR_XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN);
@@ -3429,7 +3409,7 @@ static void tagmon(const Arg *arg) {
 }
 
 static void tile(Monitor *m) {
-  unsigned int i = 0, n = 0, mw, master_y, stack_y, remaining_height, remaining_windows, stack_height;
+  unsigned int i = 0, n = 0, mw, my, sy, rh, rw, sh;
   Client *c;
   struct wlr_box target;
 
@@ -3439,7 +3419,7 @@ static void tile(Monitor *m) {
   if (!n)
     return;
   mw = (int)((m->w.width - m->gaps * enablegaps) * m->mfact);
-  master_y = stack_y = m->w.y + m->gaps * enablegaps;
+  my = sy = m->w.y + m->gaps * enablegaps;
 
   wl_list_for_each(c, &clients, link) {
     if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
@@ -3449,21 +3429,21 @@ static void tile(Monitor *m) {
     } else if (i == 0) {
       target = (struct wlr_box){
           .x = m->w.x + m->gaps * enablegaps,
-          .y = master_y,
+          .y = my,
           .width = mw - m->gaps * enablegaps,
           .height = m->w.height - 2 * m->gaps * enablegaps};
     } else {
-      remaining_height = m->w.height - (stack_y - m->w.y) - m->gaps * enablegaps;
-      remaining_windows = n - i;
-      stack_height = (remaining_height - (remaining_windows - 1) * m->gaps * enablegaps) / remaining_windows;
+      rh = m->w.height - (sy - m->w.y) - m->gaps * enablegaps;
+      rw = n - i;
+      sh = (rh - (rw - 1) * m->gaps * enablegaps) / rw;
 
       target = (struct wlr_box){
           .x = m->w.x + mw + m->gaps * enablegaps,
-          .y = stack_y,
+          .y = sy,
           .width = m->w.width - mw - 2 * m->gaps * enablegaps,
-          .height = stack_height};
+          .height = sh};
 
-      stack_y += stack_height + m->gaps * enablegaps;
+      sy += sh + m->gaps * enablegaps;
     }
     start_layout_animation(c, m, &target);
     i++;
