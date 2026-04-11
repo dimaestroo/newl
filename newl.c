@@ -1071,11 +1071,8 @@ static void get_projected_animation_box(const Animation *anim, struct wlr_box *p
   *projected = anim->target;
   if (bezier_peak_y <= 1.0f)
     return;
-
-  if (anim->target.width != anim->start.width)
-    projected->width = (int)(anim->start.width + (anim->target.width - anim->start.width) * bezier_peak_y);
-  if (anim->target.height != anim->start.height)
-    projected->height = (int)(anim->start.height + (anim->target.height - anim->start.height) * bezier_peak_y);
+  projected->width = (int)(anim->start.width + (anim->target.width - anim->start.width) * bezier_peak_y);
+  projected->height = (int)(anim->start.height + (anim->target.height - anim->start.height) * bezier_peak_y);
 }
 
 static void start_animation(Animation *anim, const struct wlr_box *geom, float opacity,
@@ -1178,7 +1175,6 @@ static void client_request_surface_size(Client *c, const struct wlr_box *geo) {
   uint32_t width, height;
   width = MAX(c->anim.active ? MAX(geo->width, c->anim.target.width) : geo->width, 1 + 2 * (int)c->bw) - 2 * c->bw;
   height = MAX(c->anim.active ? MAX(geo->height, c->anim.target.height) : geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw;
-
 #ifdef XWAYLAND
   if (client_is_x11(c)) {
     client_configure_x11_surface(c, geo, width, height);
@@ -1218,11 +1214,11 @@ static void start_client_animation(Client *c, const struct wlr_box *target, cons
     return;
   start_animation(&c->anim, &c->geom, c->opacity, target, start,
                   target_opacity, start_time);
-  c->anim.projected = *target;
-  get_projected_animation_box(&c->anim, &c->anim.projected);
+  if (!c->initial_position)
+    get_projected_animation_box(&c->anim, &c->anim.projected);
   c->anim.grow = c->anim.projected.width > c->anim.target.width ||
                  c->anim.projected.height > c->anim.target.height;
-  if (c->anim.grow)
+  if (c->anim.grow && !c->initial_position)
     client_request_surface_size(c, &c->anim.projected);
   wlr_output_schedule_frame(c->mon->wlr_output);
 }
@@ -1259,6 +1255,9 @@ static int client_prepare_initial_layout(Client *c) {
     c->anim.target = monitor_get_tile_client_box(c->mon, i - 1, i);
   } else
     return 0;
+  c->anim.start = c->anim.target;
+  scale_box_about_center(&c->anim.start, scale_in);
+  get_projected_animation_box(&c->anim, &c->anim.projected);
 
   return 1;
 }
@@ -1302,9 +1301,7 @@ static void start_layer_surface_animation(LayerSurface *l, const struct wlr_box 
                 !!(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP);
 
     l->anim.start = *target;
-    apply_initial_box_offset(&l->anim.start, dir_x,
-                             dir_y || !(anchor & (ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
-                                                  ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM)));
+    apply_initial_box_offset(&l->anim.start, dir_x, dir_y || !(anchor & (ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM)));
     start = &l->anim.start;
     l->opacity = 0.0f;
     l->initial_position = 0;
@@ -1947,7 +1944,7 @@ static void commitnotify(struct wl_listener *listener, void *data) {
     if (c->mon) {
       client_set_scale(client_surface(c), c->mon->wlr_output->scale);
       if (client_prepare_initial_layout(c))
-        client_request_surface_size(c, &c->anim.target);
+        client_request_surface_size(c, &c->anim.projected);
     }
     setmon(c, NULL, 0);
     wlr_xdg_toplevel_set_wm_capabilities(c->surface.xdg->toplevel,
