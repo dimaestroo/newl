@@ -1005,10 +1005,10 @@ static void sample_animation(Animation *anim, const struct timespec *now,
                     (now->tv_nsec - anim->start_time.tv_nsec) / 1000000) /
                    ANIMATION_DURATION;
   anim->eased_progress = get_y_for_point(&bezier, anim->progress);
-  geom->x = (int)(anim->start.x + (anim->target.x - anim->start.x) * anim->eased_progress);
-  geom->y = (int)(anim->start.y + (anim->target.y - anim->start.y) * anim->eased_progress);
-  geom->width = (int)(anim->start.width + (anim->target.width - anim->start.width) * anim->eased_progress);
-  geom->height = (int)(anim->start.height + (anim->target.height - anim->start.height) * anim->eased_progress);
+  geom->x = anim->start.x + (int)((anim->target.x - anim->start.x) * anim->eased_progress);
+  geom->y = anim->start.y + (int)((anim->target.y - anim->start.y) * anim->eased_progress);
+  geom->width = anim->start.width + (int)((anim->target.width - anim->start.width) * anim->eased_progress);
+  geom->height = anim->start.height + (int)((anim->target.height - anim->start.height) * anim->eased_progress);
   *opacity = fmaxf(0.0f, fminf(anim->start_opacity + (anim->target_opacity - anim->start_opacity) * anim->eased_progress, 1.0f));
 }
 
@@ -1172,7 +1172,7 @@ static int client_map_unmanaged(Client *c) {
 }
 
 static void client_request_surface_size(Client *c, const struct wlr_box *geo) {
-  uint32_t width, height;
+  int32_t width, height;
   width = MAX(c->anim.active ? MAX(geo->width, c->anim.target.width) : geo->width, 1 + 2 * (int)c->bw) - 2 * c->bw;
   height = MAX(c->anim.active ? MAX(geo->height, c->anim.target.height) : geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw;
 #ifdef XWAYLAND
@@ -1181,7 +1181,7 @@ static void client_request_surface_size(Client *c, const struct wlr_box *geo) {
     return;
   }
 #endif
-  wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel, (int32_t)width, (int32_t)height);
+  wlr_xdg_toplevel_set_size(c->surface.xdg->toplevel, width, height);
 }
 
 static void client_apply_x11_configure_request(
