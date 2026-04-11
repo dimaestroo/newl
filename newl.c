@@ -653,12 +653,12 @@ static inline struct wlr_box monitor_get_tile_client_box(Monitor *m, int index, 
   sy = m->w.y + m->gaps * enablegaps;
   for (i = 1; i < index; i++) {
     rh = m->w.height - (sy - m->w.y) - m->gaps * enablegaps;
-    rw = (int)(count - i);
+    rw = count - i;
     sh = (rh - (rw - 1) * m->gaps * enablegaps) / rw;
     sy += sh + m->gaps * enablegaps;
   }
   rh = m->w.height - (sy - m->w.y) - m->gaps * enablegaps;
-  rw = (int)(count - index);
+  rw = count - index;
   sh = (rh - (rw - 1) * m->gaps * enablegaps) / rw;
   return (struct wlr_box){
       .x = m->w.x + mw + m->gaps * enablegaps,
@@ -672,8 +672,8 @@ static inline void client_get_clip(Client *c, struct wlr_box *clip, const struct
   *clip = (struct wlr_box){
       .x = 0,
       .y = 0,
-      .width = MAX(geom->width, 1 + (int)c->bw) - c->bw,
-      .height = MAX(geom->height, 1 + (int)c->bw) - c->bw,
+      .width = MAX(geom->width, 1 + 2 * (int)c->bw) - 2 * (int)c->bw,
+      .height = MAX(geom->height, 1 + 2 * (int)c->bw) - 2 * (int)c->bw,
   };
 
 #ifdef XWAYLAND
@@ -1104,17 +1104,17 @@ static void client_apply_visual_geometry(Client *c, const struct wlr_box *geo) {
   wlr_scene_node_set_position(&c->scene->node, geo->x, geo->y);
   wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
   if (c->border[0]) {
-    wlr_scene_rect_set_size(c->border[0], MAX(geo->width, 1 + (int)c->bw), c->bw);
-    wlr_scene_rect_set_size(c->border[1], MAX(geo->width, 1 + (int)c->bw), c->bw);
+    wlr_scene_rect_set_size(c->border[0], MAX(geo->width, 1 + 2 * (int)c->bw), c->bw);
+    wlr_scene_rect_set_size(c->border[1], MAX(geo->width, 1 + 2 * (int)c->bw), c->bw);
     wlr_scene_rect_set_size(c->border[2], c->bw,
-                            MAX(geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw);
+                            MAX(geo->height, 1 + 2 * (int)c->bw) - 2 * (int)c->bw);
     wlr_scene_rect_set_size(c->border[3], c->bw,
-                            MAX(geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw);
+                            MAX(geo->height, 1 + 2 * (int)c->bw) - 2 * (int)c->bw);
     wlr_scene_node_set_position(&c->border[1]->node, 0,
-                                MAX(geo->height, 1 + (int)c->bw) - c->bw);
+                                MAX(geo->height, 1 + 2 * (int)c->bw) - (int)c->bw);
     wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
     wlr_scene_node_set_position(&c->border[3]->node,
-                                MAX(geo->width, 1 + (int)c->bw) - c->bw, c->bw);
+                                MAX(geo->width, 1 + 2 * (int)c->bw) - (int)c->bw, c->bw);
   }
   client_get_clip(c, &clip, geo);
   wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
@@ -1173,8 +1173,8 @@ static int client_map_unmanaged(Client *c) {
 
 static void client_request_surface_size(Client *c, const struct wlr_box *geo) {
   int32_t width, height;
-  width = MAX(c->anim.active ? MAX(geo->width, c->anim.target.width) : geo->width, 1 + 2 * (int)c->bw) - 2 * c->bw;
-  height = MAX(c->anim.active ? MAX(geo->height, c->anim.target.height) : geo->height, 1 + 2 * (int)c->bw) - 2 * c->bw;
+  width = MAX(c->anim.active ? MAX(geo->width, c->anim.target.width) : geo->width, 1 + 2 * (int)c->bw) - 2 * (int)c->bw;
+  height = MAX(c->anim.active ? MAX(geo->height, c->anim.target.height) : geo->height, 1 + 2 * (int)c->bw) - 2 * (int)c->bw;
 #ifdef XWAYLAND
   if (client_is_x11(c)) {
     client_configure_x11_surface(c, geo, width, height);
