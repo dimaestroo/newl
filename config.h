@@ -9,7 +9,7 @@
                             COLOR_COMPONENT(hex, 8) * COLOR_ALPHA(hex),  \
                             COLOR_ALPHA(hex)}
 /* animation duration in milliseconds */
-#define ANIMATION_DURATION 400.0f;
+#define ANIMATION_DURATION 1400.0f;
 /* scale in & out in respect of the designated target window geometry */
 static const float scale_in = 0.6f;
 static const float scale_out = 0.8f;

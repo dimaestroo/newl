@@ -1569,6 +1569,7 @@ static void applyrules(Client *c) {
 static void arrange(Monitor *m) {
   Client *c;
   int arranged, should_show;
+  struct wlr_box target;
 
   if (!m->wlr_output->enabled)
     return;
@@ -1608,9 +1609,9 @@ static void arrange(Monitor *m) {
     if (arranged && !c->isfloating && !c->isfullscreen)
       continue;
 
-    c->anim.target = c->isfullscreen ? m->m : !arranged && !c->isfloating ? monitor_get_single_client_box(m)
+    target = c->isfullscreen ? m->m : !arranged && !c->isfloating ? monitor_get_single_client_box(m)
                                                                           : c->geom;
-    start_layout_animation(c, m, &c->anim.target);
+    start_layout_animation(c, m, &target);
   }
   motionnotify(0, NULL, 0, 0, 0, 0);
   checkidleinhibitor(NULL);
