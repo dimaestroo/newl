@@ -1246,7 +1246,7 @@ static void scale_box_about_center(struct wlr_box *box, float scale) {
 
 static bool client_prepare_initial_layout(Client *c) {
   int i;
-  if (!c->initial_position || !c->mon || !(c->tags & c->mon->tagset[c->mon->seltags]) || client_get_parent(c))
+  if (!c->initial_position || !c->mon || !(c->tags & c->mon->tagset[c->mon->seltags]))
     return 0;
   if (client_wants_fullscreen(c))
     c->anim.target = c->mon->m;
@@ -1559,10 +1559,8 @@ static void applyrules(Client *c) {
       }
     }
   }
-  if (mon) {
-    c->geom.x = (mon->w.width - c->geom.width) / 2 + mon->m.x;
-    c->geom.y = (mon->w.height - c->geom.height) / 2 + mon->m.y;
-  }
+  c->geom.x = (mon->w.width - c->geom.width) / 2 + mon->m.x;
+  c->geom.y = (mon->w.height - c->geom.height) / 2 + mon->m.y;
   setmon(c, mon, newtags);
 }
 
@@ -1610,7 +1608,7 @@ static void arrange(Monitor *m) {
       continue;
 
     target = c->isfullscreen ? m->m : !arranged && !c->isfloating ? monitor_get_single_client_box(m)
-                                                                          : c->geom;
+                                                                  : c->geom;
     start_layout_animation(c, m, &target);
   }
   motionnotify(0, NULL, 0, 0, 0, 0);
@@ -1944,11 +1942,9 @@ static void commitnotify(struct wl_listener *listener, void *data) {
 #endif
   if (c->surface.xdg->initial_commit) {
     applyrules(c);
-    if (c->mon) {
-      client_set_scale(client_surface(c), c->mon->wlr_output->scale);
-      if (client_prepare_initial_layout(c))
-        client_request_surface_size(c, &c->anim.projected);
-    }
+    client_set_scale(client_surface(c), c->mon->wlr_output->scale);
+    if (client_prepare_initial_layout(c))
+      client_request_surface_size(c, &c->anim.projected);
     setmon(c, NULL, 0);
     wlr_xdg_toplevel_set_wm_capabilities(c->surface.xdg->toplevel,
                                          WLR_XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN);
@@ -2639,10 +2635,13 @@ static void mapnotify(struct wl_listener *listener, void *data) {
 
   if ((p = client_get_parent(c))) {
     c->isfloating = 1;
-    if (p->mon) {
-      c->geom.x = p->geom.x + (p->geom.width - c->geom.width) / 2;
-      c->geom.y = p->geom.y + (p->geom.height - c->geom.height) / 2;
+    if (!client_is_x11(c)) {
+      c->geom.width = c->surface.xdg->toplevel->current.min_width + 2 * c->bw;
+      c->geom.height = c->surface.xdg->toplevel->current.min_height + 2 * c->bw;
+      client_request_surface_size(c, &c->geom);
     }
+    c->geom.x = p->geom.x + (p->geom.width - c->geom.width) / 2;
+    c->geom.y = p->geom.y + (p->geom.height - c->geom.height) / 2;
     setmon(c, p->mon, p->tags);
   } else {
     applyrules(c);
