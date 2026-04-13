@@ -1246,13 +1246,9 @@ static void scale_box_about_center(struct wlr_box *box, float scale) {
 
 static bool client_prepare_initial_layout(Client *c) {
   int i;
-  if (!c->initial_position || !c->mon || !(c->tags & c->mon->tagset[c->mon->seltags]))
+  if (!c->mon || !(c->tags & c->mon->tagset[c->mon->seltags]))
     return 0;
-  if (client_wants_fullscreen(c))
-    c->anim.target = c->mon->m;
-  else if (c->isfloating)
-    return 0;
-  else if (!c->mon->lt[c->mon->sellt]->arrange)
+  if (!c->mon->lt[c->mon->sellt]->arrange)
     c->anim.target = monitor_get_single_client_box(c->mon);
   else if (c->mon->lt[c->mon->sellt]->arrange == tile) {
     i = monitor_count_tiled_clients(c->mon) + 1;
@@ -1294,7 +1290,6 @@ static void start_tag_switch_exit_animation(Client *c, Monitor *m) {
 }
 
 static void start_layer_surface_animation(LayerSurface *l, const struct wlr_box *target) {
-  const struct wlr_box *start = NULL;
   if (l->initial_position) {
     uint32_t anchor = l->layer_surface->current.anchor;
     int dir_x = !!(anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT) -
@@ -1304,11 +1299,11 @@ static void start_layer_surface_animation(LayerSurface *l, const struct wlr_box 
 
     l->anim.start = *target;
     apply_initial_box_offset(&l->anim.start, dir_x, dir_y || !(anchor & (ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM)));
-    start = &l->anim.start;
     l->opacity = 0.0f;
-    l->initial_position = 0;
   }
-  start_animation(&l->anim, &l->geom, l->opacity, target, start, 1.0f, NULL);
+  start_animation(&l->anim, &l->geom, l->opacity, target, l->initial_position ? &l->anim.start : NULL, 1.0f, NULL);
+  if (l->initial_position)
+    l->initial_position = 0;
 }
 
 static bool close_overlay_buffer_accepts_input(struct wlr_scene_buffer *buffer, double *sx, double *sy) {
@@ -1335,17 +1330,15 @@ static void snapshot_close_overlay_buffer(struct wlr_scene_buffer *buffer, int s
   snapshot->geom = (struct wlr_box){
       .x = sx - overlay->geom.x,
       .y = sy - overlay->geom.y,
-      .width = buffer->dst_width > 0 ? buffer->dst_width : buffer->buffer->width,
-      .height = buffer->dst_height > 0 ? buffer->dst_height : buffer->buffer->height,
+      .width = buffer->dst_width,
+      .height = buffer->dst_height,
   };
   snapshot->opacity = buffer->opacity;
   wlr_scene_node_set_position(&snapshot->scene_buffer->node,
                               snapshot->geom.x, snapshot->geom.y);
-  if (buffer->src_box.width > 0.0f && buffer->src_box.height > 0.0f)
-    wlr_scene_buffer_set_source_box(snapshot->scene_buffer, &buffer->src_box);
-  if (snapshot->geom.width > 0 && snapshot->geom.height > 0)
-    wlr_scene_buffer_set_dest_size(snapshot->scene_buffer,
-                                   snapshot->geom.width, snapshot->geom.height);
+  wlr_scene_buffer_set_source_box(snapshot->scene_buffer, &buffer->src_box);
+  wlr_scene_buffer_set_dest_size(snapshot->scene_buffer,
+                                 snapshot->geom.width, snapshot->geom.height);
   wlr_scene_buffer_set_transform(snapshot->scene_buffer, buffer->transform);
   wlr_scene_buffer_set_filter_mode(snapshot->scene_buffer, buffer->filter_mode);
   wlr_scene_buffer_set_opacity(snapshot->scene_buffer, snapshot->opacity);
@@ -1502,8 +1495,12 @@ static int step_close_overlay_frame(CloseOverlay *overlay, const struct timespec
                                 SCALE_GEOM(buffer->geom.x, overlay->anim.start.width, overlay->geom.width),
                                 SCALE_GEOM(buffer->geom.y, overlay->anim.start.height, overlay->geom.height));
     wlr_scene_buffer_set_dest_size(buffer->scene_buffer,
-                                   MAX(SCALE_GEOM(buffer->geom.width, overlay->anim.start.width, overlay->geom.width), 1),
-                                   MAX(SCALE_GEOM(buffer->geom.height, overlay->anim.start.height, overlay->geom.height), 1));
+                                   MAX(SCALE_GEOM(buffer->geom.x + buffer->geom.width, overlay->anim.start.width, overlay->geom.width) -
+                                           SCALE_GEOM(buffer->geom.x, overlay->anim.start.width, overlay->geom.width),
+                                       1),
+                                   MAX(SCALE_GEOM(buffer->geom.y + buffer->geom.height, overlay->anim.start.height, overlay->geom.height) -
+                                           SCALE_GEOM(buffer->geom.y, overlay->anim.start.height, overlay->geom.height),
+                                       1));
     wlr_scene_buffer_set_opacity(buffer->scene_buffer, buffer->opacity * opacity);
   }
   wl_list_for_each(rect, &overlay->rects, link) {
@@ -1511,8 +1508,12 @@ static int step_close_overlay_frame(CloseOverlay *overlay, const struct timespec
                                 SCALE_GEOM(rect->geom.x, overlay->anim.start.width, overlay->geom.width),
                                 SCALE_GEOM(rect->geom.y, overlay->anim.start.height, overlay->geom.height));
     wlr_scene_rect_set_size(rect->scene_rect,
-                            MAX(SCALE_GEOM(rect->geom.width, overlay->anim.start.width, overlay->geom.width), 1),
-                            MAX(SCALE_GEOM(rect->geom.height, overlay->anim.start.height, overlay->geom.height), 1));
+                            MAX(SCALE_GEOM(rect->geom.x + rect->geom.width, overlay->anim.start.width, overlay->geom.width) -
+                                    SCALE_GEOM(rect->geom.x, overlay->anim.start.width, overlay->geom.width),
+                                1),
+                            MAX(SCALE_GEOM(rect->geom.y + rect->geom.height, overlay->anim.start.height, overlay->geom.height) -
+                                    SCALE_GEOM(rect->geom.y, overlay->anim.start.height, overlay->geom.height),
+                                1));
     scale_premultiplied_rgba(rect->color, opacity, color);
     wlr_scene_rect_set_color(rect->scene_rect, color);
   }
@@ -3461,7 +3462,7 @@ static void tag(const Arg *arg) {
   Client *sel = focustop(selmon);
   if (!sel || !(newtags = arg->ui & TAGMASK))
     return;
-
+  sel->mon->focus_anchors[sel->mon->curtag] = focus_fallback_from(sel, sel->mon);
   sel->tags = newtags;
   setmonitortags(selmon, newtags, 1);
   focusclient(sel, 1);
