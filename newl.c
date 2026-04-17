@@ -1105,7 +1105,7 @@ static void start_animation(Animation *anim, const struct wlr_box *geom, float o
 static void client_apply_visual_geometry(Client *c, const struct wlr_box *geo) {
   struct wlr_box clip;
 
-  if (!c->mon || !client_surface(c)->mapped)
+  if (!c->scene || !c->scene_surface || !client_surface(c)->mapped)
     return;
   wlr_scene_node_set_position(&c->scene->node, geo->x, geo->y);
   wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
